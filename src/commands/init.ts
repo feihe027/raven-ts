@@ -6,7 +6,10 @@ import {
   setFeishuConfig,
   getFeishuConfig,
   setClaudeConfig,
+  setCodexConfig,
+  setAgentProvider,
   type FeishuConfig,
+  type AgentProvider,
 } from "../config.js";
 import { createFeishuClient } from "../feishu/client.js";
 import { installDaemon, startDaemon } from "../daemon/service.js";
@@ -56,8 +59,8 @@ function parsePositiveInteger(value: string, fallback: number): number {
 }
 
 export async function initCommand(): Promise<void> {
-  console.log(chalk.cyan("\ncc-ys init\n"));
-  console.log("This will guide you through setting up cc-ys.\n");
+  console.log(chalk.cyan("\nraven-ts init\n"));
+  console.log("This will guide you through setting up raven-ts.\n");
 
   const claudeSpinner = ora("Checking Claude Agent SDK...").start();
   const { checkClaudeSdkAvailable } = await import("../claude/executor.js");
@@ -68,6 +71,17 @@ export async function initCommand(): Promise<void> {
     console.log(chalk.yellow("Claude Agent SDK is not available. Run npm install first.\n"));
   } else {
     console.log(chalk.green("Claude Agent SDK found\n"));
+  }
+
+  const codexSpinner = ora("Checking Codex Agent SDK...").start();
+  const { checkCodexSdkAvailable } = await import("../codex/executor.js");
+  const codexAvailable = await checkCodexSdkAvailable();
+  codexSpinner.stop();
+
+  if (!codexAvailable) {
+    console.log(chalk.yellow("Codex Agent SDK is not available. Run npm install first.\n"));
+  } else {
+    console.log(chalk.green("Codex Agent SDK found\n"));
   }
 
   // Show existing config if any
@@ -92,6 +106,13 @@ export async function initCommand(): Promise<void> {
       ["feishu", "lark"],
       existingConfig?.domain ?? "feishu"
     );
+
+    const agentProvider = (await promptSelect(
+      rl,
+      "Select agent backend:",
+      ["claude", "codex"],
+      "claude"
+    )) as AgentProvider;
 
     // App ID
     const appId = await prompt(rl, "App ID", existingConfig?.appId);
@@ -118,6 +139,7 @@ export async function initCommand(): Promise<void> {
 
     const maxTurnsAnswer = await prompt(rl, "Claude SDK max turns", "20");
     const timeoutAnswer = await prompt(rl, "Claude SDK timeout in milliseconds", "300000");
+    const codexBin = await prompt(rl, "Codex binary path (optional)", "");
 
     // Start daemon
     const startDaemonBool = await promptConfirm(rl, "Start as background service?", true);
@@ -137,16 +159,20 @@ export async function initCommand(): Promise<void> {
       maxTurns: parsePositiveInteger(maxTurnsAnswer, 20),
       timeoutMs: parsePositiveInteger(timeoutAnswer, 300000),
     });
+    setCodexConfig({
+      codexBin: codexBin || undefined,
+    });
+    setAgentProvider(agentProvider);
 
-    console.log(chalk.green("\n✓ Configuration saved\n"));
+    console.log(chalk.green("\n[OK] Configuration saved\n"));
 
     const envFile = writeClaudeEnvFile();
     if (envFile.variableNames.length > 0) {
-      console.log(chalk.green(`✓ Claude environment file written: ${envFile.path}`));
+      console.log(chalk.green(`[OK] Claude environment file written: ${envFile.path}`));
       console.log(chalk.dim(`  Variables: ${envFile.variableNames.join(", ")}`));
     } else {
       console.log(chalk.yellow(`Claude environment file written with no ANTHROPIC_* variables: ${envFile.path}`));
-      console.log(chalk.dim("  Export ANTHROPIC_* variables before running init if the service needs API credentials."));
+      console.log(chalk.dim("  Export ANTHROPIC_*, OPENAI_*, or CODEX_* variables before running init if the service needs API credentials."));
     }
     console.log();
 
@@ -202,13 +228,13 @@ export async function initCommand(): Promise<void> {
     console.log(chalk.cyan("Next steps:"));
     console.log();
     console.log("1. Add the bot to a Feishu group chat or start a direct message");
-    console.log("2. Send a message to trigger Claude Agent SDK");
+    console.log("2. Send a message to trigger the configured agent SDK");
     console.log();
     console.log(chalk.dim("Commands available in chat:"));
-    console.log(chalk.dim("  /cc help     - Show available commands"));
-    console.log(chalk.dim("  /cc cd <dir> - Change working directory"));
-    console.log(chalk.dim("  /cc pwd      - Show current directory"));
-    console.log(chalk.dim("  /cc clear    - Clear conversation history"));
+    console.log(chalk.dim("  /r help     - Show available commands"));
+    console.log(chalk.dim("  /r cd <dir> - Change working directory"));
+    console.log(chalk.dim("  /r pwd      - Show current directory"));
+    console.log(chalk.dim("  /r clear    - Clear conversation history"));
     console.log();
   } finally {
     rl.close();

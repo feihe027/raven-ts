@@ -1,10 +1,16 @@
 import chalk from "chalk";
 import {
+  getAgentProvider,
+  getCodexConfig,
   getFeishuConfig,
-  setFeishuConfig,
   getClaudeConfig,
-  setClaudeConfig,
   getConfigPath,
+  setAgentProvider,
+  setCodexConfig,
+  setFeishuConfig,
+  setClaudeConfig,
+  type AgentProvider,
+  type CodexConfig,
   type FeishuConfig,
 } from "../config.js";
 
@@ -17,7 +23,7 @@ export async function configCommand(action: string, key?: string, value?: string
 
     case "set":
       if (!key || !value) {
-        console.log(chalk.red("Usage: cc-ys config set <key> <value>"));
+        console.log(chalk.red("Usage: raven-ts config set <key> <value>"));
         console.log();
         console.log("Available keys:");
         console.log("  feishu.appId");
@@ -25,9 +31,16 @@ export async function configCommand(action: string, key?: string, value?: string
         console.log("  feishu.verificationToken");
         console.log("  feishu.encryptKey");
         console.log("  feishu.domain");
+        console.log("  agent.provider");
         console.log("  claude.defaultWorkDir");
         console.log("  claude.maxTurns");
         console.log("  claude.timeoutMs");
+        console.log("  codex.model");
+        console.log("  codex.codexBin");
+        console.log("  codex.reasoningEffort");
+        console.log("  codex.timeoutMs");
+        console.log("  codex.skipGitRepoCheck");
+        console.log("  codex.networkAccessEnabled");
         return;
       }
       await setConfigValue(key, value);
@@ -39,17 +52,22 @@ export async function configCommand(action: string, key?: string, value?: string
 
     default:
       console.log(chalk.red(`Unknown action: ${action}`));
-      console.log("Usage: cc-ys config <list|set|path>");
+      console.log("Usage: raven-ts config <list|set|path>");
   }
 }
 
 function showConfig(): void {
-  console.log(chalk.cyan("\n⚙️  Configuration\n"));
+  console.log(chalk.cyan("\nConfiguration\n"));
   console.log(`Config file: ${getConfigPath()}`);
   console.log();
 
   const feishu = getFeishuConfig();
   const claude = getClaudeConfig();
+  const codex = getCodexConfig();
+
+  console.log(chalk.bold("Agent:"));
+  console.log(`  provider: ${getAgentProvider()}`);
+  console.log();
 
   console.log(chalk.bold("Feishu:"));
   if (feishu) {
@@ -68,73 +86,155 @@ function showConfig(): void {
   console.log(`  maxTurns: ${claude.maxTurns}`);
   console.log(`  timeoutMs: ${claude.timeoutMs}`);
   console.log();
+
+  console.log(chalk.bold("Codex:"));
+  console.log(`  model: ${codex.model || "gpt-5.3-codex"}`);
+  console.log(`  codexBin: ${codex.codexBin || "(provider default)"}`);
+  console.log(`  reasoningEffort: ${codex.reasoningEffort}`);
+  console.log(`  timeoutMs: ${codex.timeoutMs}`);
+  console.log(`  skipGitRepoCheck: ${codex.skipGitRepoCheck}`);
+  console.log(`  networkAccessEnabled: ${codex.networkAccessEnabled}`);
+  console.log();
 }
 
 async function setConfigValue(key: string, value: string): Promise<void> {
   const [section, subkey] = key.split(".");
 
   if (section === "feishu") {
-    const existing = getFeishuConfig();
-    if (!existing) {
-      console.log(chalk.red("Feishu not configured. Run 'cc-ys init' first."));
-      return;
-    }
-
-    const feishu: FeishuConfig = { ...existing };
-
-    switch (subkey) {
-      case "appId":
-        feishu.appId = value;
-        break;
-      case "appSecret":
-        feishu.appSecret = value;
-        break;
-      case "verificationToken":
-        feishu.verificationToken = value || undefined;
-        break;
-      case "encryptKey":
-        feishu.encryptKey = value || undefined;
-        break;
-      case "domain":
-        if (value !== "feishu" && value !== "lark") {
-          console.log(chalk.red("Domain must be 'feishu' or 'lark'"));
-          return;
-        }
-        feishu.domain = value;
-        break;
-      default:
-        console.log(chalk.red(`Unknown key: feishu.${subkey}`));
-        return;
-    }
-
-    setFeishuConfig(feishu);
-    console.log(chalk.green(`✓ Set ${key}`));
+    setFeishuValue(key, subkey, value);
+  } else if (section === "agent") {
+    setAgentValue(key, subkey, value);
   } else if (section === "claude") {
-    switch (subkey) {
-      case "defaultWorkDir":
-        setClaudeConfig({ defaultWorkDir: value });
-        break;
-      case "maxTurns": {
-        const parsed = parsePositiveInteger(value, "claude.maxTurns");
-        if (parsed === null) return;
-        setClaudeConfig({ maxTurns: parsed });
-        break;
-      }
-      case "timeoutMs": {
-        const parsed = parsePositiveInteger(value, "claude.timeoutMs");
-        if (parsed === null) return;
-        setClaudeConfig({ timeoutMs: parsed });
-        break;
-      }
-      default:
-        console.log(chalk.red(`Unknown key: claude.${subkey}`));
-        return;
-    }
-
-    console.log(chalk.green(`✓ Set ${key}`));
+    setClaudeValue(key, subkey, value);
+  } else if (section === "codex") {
+    setCodexValue(key, subkey, value);
   } else {
     console.log(chalk.red(`Unknown section: ${section}`));
   }
+}
+
+function setFeishuValue(key: string, subkey: string, value: string): void {
+  const existing = getFeishuConfig();
+  if (!existing) {
+    console.log(chalk.red("Feishu not configured. Run 'raven-ts init' first."));
+    return;
+  }
+
+  const feishu: FeishuConfig = { ...existing };
+
+  switch (subkey) {
+    case "appId":
+      feishu.appId = value;
+      break;
+    case "appSecret":
+      feishu.appSecret = value;
+      break;
+    case "verificationToken":
+      feishu.verificationToken = value || undefined;
+      break;
+    case "encryptKey":
+      feishu.encryptKey = value || undefined;
+      break;
+    case "domain":
+      if (value !== "feishu" && value !== "lark") {
+        console.log(chalk.red("Domain must be 'feishu' or 'lark'"));
+        return;
+      }
+      feishu.domain = value;
+      break;
+    default:
+      console.log(chalk.red(`Unknown key: feishu.${subkey}`));
+      return;
+  }
+
+  setFeishuConfig(feishu);
+  console.log(chalk.green(`Set ${key}`));
+}
+
+function setAgentValue(key: string, subkey: string, value: string): void {
+  if (subkey !== "provider") {
+    console.log(chalk.red(`Unknown key: agent.${subkey}`));
+    return;
+  }
+
+  if (value !== "claude" && value !== "codex") {
+    console.log(chalk.red("Agent provider must be 'claude' or 'codex'"));
+    return;
+  }
+
+  setAgentProvider(value as AgentProvider);
+  console.log(chalk.green(`Set ${key}`));
+}
+
+function setClaudeValue(key: string, subkey: string, value: string): void {
+  switch (subkey) {
+    case "defaultWorkDir":
+      setClaudeConfig({ defaultWorkDir: value });
+      break;
+    case "maxTurns": {
+      const parsed = parsePositiveInteger(value, "claude.maxTurns");
+      if (parsed === null) return;
+      setClaudeConfig({ maxTurns: parsed });
+      break;
+    }
+    case "timeoutMs": {
+      const parsed = parsePositiveInteger(value, "claude.timeoutMs");
+      if (parsed === null) return;
+      setClaudeConfig({ timeoutMs: parsed });
+      break;
+    }
+    default:
+      console.log(chalk.red(`Unknown key: claude.${subkey}`));
+      return;
+  }
+
+  console.log(chalk.green(`Set ${key}`));
+}
+
+function setCodexValue(key: string, subkey: string, value: string): void {
+  const patch: Partial<CodexConfig> = {};
+
+  switch (subkey) {
+    case "model":
+      patch.model = value || undefined;
+      break;
+    case "codexBin":
+      patch.codexBin = ["", "default", "none", "null"].includes(value.toLowerCase())
+        ? undefined
+        : value;
+      break;
+    case "reasoningEffort":
+      if (!["minimal", "low", "medium", "high", "xhigh"].includes(value)) {
+        console.log(chalk.red("codex.reasoningEffort must be minimal, low, medium, high, or xhigh"));
+        return;
+      }
+      patch.reasoningEffort = (value === "minimal" ? "low" : value) as CodexConfig["reasoningEffort"];
+      break;
+    case "timeoutMs": {
+      const parsed = parsePositiveInteger(value, "codex.timeoutMs");
+      if (parsed === null) return;
+      patch.timeoutMs = parsed;
+      break;
+    }
+    case "skipGitRepoCheck": {
+      const parsed = parseBoolean(value, "codex.skipGitRepoCheck");
+      if (parsed === null) return;
+      patch.skipGitRepoCheck = parsed;
+      break;
+    }
+    case "networkAccessEnabled": {
+      const parsed = parseBoolean(value, "codex.networkAccessEnabled");
+      if (parsed === null) return;
+      patch.networkAccessEnabled = parsed;
+      break;
+    }
+    default:
+      console.log(chalk.red(`Unknown key: codex.${subkey}`));
+      return;
+  }
+
+  setCodexConfig(patch);
+  console.log(chalk.green(`Set ${key}`));
 }
 
 function parsePositiveInteger(value: string, key: string): number | null {
@@ -144,4 +244,16 @@ function parsePositiveInteger(value: string, key: string): number | null {
     return null;
   }
   return parsed;
+}
+
+function parseBoolean(value: string, key: string): boolean | null {
+  const normalized = value.toLowerCase();
+  if (["true", "1", "yes", "y"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "n"].includes(normalized)) {
+    return false;
+  }
+  console.log(chalk.red(`${key} must be true or false`));
+  return null;
 }

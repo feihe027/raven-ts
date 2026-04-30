@@ -5,7 +5,7 @@ export async function stopCommand(): Promise<void> {
   const result = await stopDaemon();
 
   if (result.success) {
-    console.log(chalk.green(`✓ ${result.message}`));
+    console.log(chalk.green(`[OK] ${result.message}`));
   } else {
     console.log(chalk.red(result.message));
   }

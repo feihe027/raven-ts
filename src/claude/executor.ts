@@ -24,11 +24,11 @@ export interface ExecuteOptions {
   maxTurns: number;
 }
 
-const DENIED_BASH_MESSAGE = "Bash command denied by cc-ys allowlist";
+const DENIED_BASH_MESSAGE = "Bash command denied by raven-ts allowlist";
 const SYSTEM_PROMPT_APPEND = [
-  "cc-ys runs Claude from a Feishu/Lark bot with non-interactive permissions.",
+  "raven-ts runs Claude from a Feishu/Lark bot with non-interactive permissions.",
   "For network access, prefer built-in WebSearch or WebFetch tools. Do not use Bash network commands such as curl, wget, nc, or ad-hoc Python HTTP clients.",
-  "If a tool is denied by cc-ys, continue the turn and explain the denied command instead of waiting for manual approval.",
+  "If a tool is denied by raven-ts, continue the turn and explain the denied command instead of waiting for manual approval.",
 ].join("\n");
 let cachedClaudeCodeExecutablePath: string | undefined | null;
 
@@ -168,6 +168,8 @@ function resolveClaudeCodeExecutablePath(): string | undefined {
   }
 
   const envPath =
+    process.env.RAVEN_TS_CLAUDE_CODE_PATH ||
+    process.env.RAVEN_CLAUDE_CODE_PATH ||
     process.env.CC_YS_CLAUDE_CODE_PATH ||
     process.env.CLAUDE_CODE_EXECUTABLE ||
     process.env.CLAUDE_CODE_PATH;
@@ -365,7 +367,7 @@ function formatThrownSdkError(err: unknown, timedOut: boolean, timeout: number):
   if (message.includes("[ede_diagnostic]")) {
     return [
       "Claude SDK stopped after a tool call before producing a final answer.",
-      "This is usually caused by a denied or unfinished tool call. If this session keeps failing, run /cc clear and retry.",
+      "This is usually caused by a denied or unfinished tool call. If this session keeps failing, run /r clear and retry.",
       "",
       message,
     ].join("\n");

@@ -11,19 +11,19 @@ const __dirname = dirname(__filename);
 
 // Read version from package.json
 const packageJson = JSON.parse(
-  readFileSync(join(__dirname, "..", "package.json"), "utf-8")
+  readFileSync(join(__dirname, "..", "package.json"), "utf-8").replace(/^\uFEFF/, "")
 );
 
 const program = new Command();
 
 program
-  .name("cc-ys")
-  .description("Feishu/Lark control service for Claude Agent SDK")
+  .name("raven-ts")
+  .description("Feishu/Lark control service for Claude and Codex Agent SDKs")
   .version(packageJson.version);
 
 program
   .command("init")
-  .description("Initialize and configure cc-ys")
+  .description("Initialize and configure raven-ts")
   .action(async () => {
     const { initCommand } = await import("./commands/init.js");
     await initCommand();
@@ -31,7 +31,7 @@ program
 
 program
   .command("start")
-  .description("Start the cc-ys service")
+  .description("Start the raven-ts service")
   .option("-f, --foreground", "Run in foreground instead of background daemon")
   .action(async (options: { foreground: boolean }) => {
     const { startCommand } = await import("./commands/start.js");

@@ -1,17 +1,23 @@
 import chalk from "chalk";
 import ora from "ora";
-import { isConfigured, getFeishuConfig, getClaudeConfig } from "../config.js";
+import { isConfigured, getAgentProvider, getFeishuConfig, getClaudeConfig } from "../config.js";
 import { startFeishuListener } from "../feishu/handler.js";
 import { checkClaudeSdkAvailable } from "../claude/executor.js";
+import { checkCodexSdkAvailable } from "../codex/executor.js";
 
 export async function startCommand(foreground: boolean = false): Promise<void> {
   if (!isConfigured()) {
-    console.log(chalk.red("Error: Not configured. Run 'cc-ys init' first."));
+    console.log(chalk.red("Error: Not configured. Run 'raven-ts init' first."));
     process.exit(1);
   }
 
-  if (!(await checkClaudeSdkAvailable())) {
-    console.log(chalk.yellow("Warning: Claude Agent SDK is not available. Run npm install first."));
+  const provider = getAgentProvider();
+  const sdkAvailable =
+    provider === "codex" ? await checkCodexSdkAvailable() : await checkClaudeSdkAvailable();
+
+  if (!sdkAvailable) {
+    const sdkName = provider === "codex" ? "Codex Agent SDK" : "Claude Agent SDK";
+    console.log(chalk.yellow(`Warning: ${sdkName} is not available. Run npm install first.`));
   }
 
   if (foreground) {
@@ -35,13 +41,14 @@ export async function startCommand(foreground: boolean = false): Promise<void> {
 }
 
 async function runForeground(): Promise<void> {
-  console.log(chalk.cyan("Starting cc-ys in foreground...\n"));
+  console.log(chalk.cyan("Starting raven-ts in foreground...\n"));
 
   const feishuConfig = getFeishuConfig()!;
   const claudeConfig = getClaudeConfig();
 
   console.log(`Feishu App ID: ${feishuConfig.appId}`);
   console.log(`Domain: ${feishuConfig.domain}`);
+  console.log(`Agent: ${getAgentProvider()}`);
   console.log(`Working Dir: ${claudeConfig.defaultWorkDir}`);
   console.log();
 
@@ -55,7 +62,7 @@ async function runForeground(): Promise<void> {
 
     spinner.succeed(`Connected! Bot ID: ${botOpenId}`);
     console.log();
-    console.log(chalk.green("✓ cc-ys is running"));
+    console.log(chalk.green("[OK] raven-ts is running"));
     console.log(chalk.dim("Press Ctrl+C to stop"));
     console.log();
 

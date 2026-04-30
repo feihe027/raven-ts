@@ -44,7 +44,7 @@ const cachedRuntimes = new Map<string, CachedRuntime>();
 
 const BASE_INSTRUCTIONS = [
   "You are Codex, OpenAI's coding agent. You are not Claude.",
-  "cc-ys runs Codex from a Feishu/Lark bot with non-interactive permissions.",
+  "raven-ts runs Codex from a Feishu/Lark bot with non-interactive permissions.",
   "Do not wait for manual approval. If a command or edit is blocked, explain the blocked action and continue.",
 ].join("\n");
 

@@ -6,6 +6,7 @@ import {
   existsSync,
   readdirSync,
   unlinkSync,
+  copyFileSync,
 } from "fs";
 import { homedir } from "os";
 import { v4 as uuidv4 } from "uuid";
@@ -15,17 +16,42 @@ export interface Session {
   chatId: string;
   workDir: string;
   claudeSessionId?: string;
+  codexThreadId?: string;
   createdAt: number;
   updatedAt: number;
   lastPromptAt?: number;
   lastResultAt?: number;
 }
 
-const SESSIONS_DIR = join(homedir(), ".cc-ys", "sessions");
+const SESSIONS_DIR = join(homedir(), ".raven-ts", "sessions");
+const LEGACY_SESSIONS_DIRS = [
+  join(homedir(), ".raven", "sessions"),
+  join(homedir(), ".cc-ys", "sessions"),
+];
 
 function ensureSessionsDir(): void {
   if (!existsSync(SESSIONS_DIR)) {
     mkdirSync(SESSIONS_DIR, { recursive: true });
+  }
+  migrateLegacySessions();
+}
+
+function migrateLegacySessions(): void {
+  const hasRavenSessions = readdirSync(SESSIONS_DIR).some((file) => file.endsWith(".json"));
+  if (hasRavenSessions) {
+    return;
+  }
+
+  for (const legacyDir of LEGACY_SESSIONS_DIRS) {
+    if (!existsSync(legacyDir)) {
+      continue;
+    }
+    for (const file of readdirSync(legacyDir)) {
+      if (file.endsWith(".json")) {
+        copyFileSync(join(legacyDir, file), join(SESSIONS_DIR, file));
+      }
+    }
+    return;
   }
 }
 
@@ -53,6 +79,7 @@ function normalizeSession(value: unknown): Session | null {
     chatId: raw.chatId,
     workDir: raw.workDir,
     claudeSessionId: raw.claudeSessionId,
+    codexThreadId: raw.codexThreadId,
     createdAt: raw.createdAt ?? Date.now(),
     updatedAt: raw.updatedAt ?? Date.now(),
     lastPromptAt: raw.lastPromptAt,
@@ -142,8 +169,44 @@ export function setClaudeSessionId(session: Session, claudeSessionId: string): v
   saveSession(session);
 }
 
+export function setCodexThreadId(session: Session, codexThreadId: string): void {
+  session.codexThreadId = codexThreadId;
+  saveSession(session);
+}
+
+export function clearClaudeSessionId(session: Session): void {
+  delete session.claudeSessionId;
+  saveSession(session);
+}
+
+export function clearCodexThreadId(session: Session): void {
+  delete session.codexThreadId;
+  saveSession(session);
+}
+
+export function clearProviderSessions(provider: "claude" | "codex"): number {
+  const sessions = listSessions();
+  let cleared = 0;
+
+  for (const session of sessions) {
+    if (provider === "codex" && session.claudeSessionId) {
+      delete session.claudeSessionId;
+      saveSession(session);
+      cleared++;
+    }
+    if (provider === "claude" && session.codexThreadId) {
+      delete session.codexThreadId;
+      saveSession(session);
+      cleared++;
+    }
+  }
+
+  return cleared;
+}
+
 export function clearClaudeSession(session: Session): void {
   delete session.claudeSessionId;
+  delete session.codexThreadId;
   delete session.lastPromptAt;
   delete session.lastResultAt;
   saveSession(session);

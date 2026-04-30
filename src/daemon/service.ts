@@ -7,8 +7,11 @@ import {
   readFileSync,
   unlinkSync,
   mkdirSync,
+  openSync,
+  closeSync,
 } from "fs";
 import { CLAUDE_ENV_PATH, ensureClaudeEnvFile } from "../claude/env.js";
+import { ensureRuntimeDir, getErrorLogPath, getLogPath, getPidPath, getWindowsMarkerPath } from "./paths.js";
 
 // ES Module equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -16,9 +19,10 @@ const __dirname = dirname(__filename);
 
 const isMacOS = platform() === "darwin";
 const isLinux = platform() === "linux";
+const isWindows = platform() === "win32";
 
-const LAUNCH_AGENT_NAME = "com.cc-ys";
-const SYSTEMD_SERVICE_NAME = "cc-ys";
+const LAUNCH_AGENT_NAME = "com.raven-ts";
+const SYSTEMD_SERVICE_NAME = "raven-ts";
 
 function getLaunchAgentPath(): string {
   const dir = join(homedir(), "Library", "LaunchAgents");
@@ -69,9 +73,9 @@ function generateLaunchAgentPlist(): string {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/cc-ys.log</string>
+    <string>${getLogPath()}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/cc-ys.error.log</string>
+    <string>${getErrorLogPath()}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -89,7 +93,7 @@ function generateSystemdService(): string {
   const daemonPath = getDaemonScriptPath();
 
   return `[Unit]
-Description=cc-ys - Feishu control service for Claude Agent SDK
+Description=raven-ts - Feishu control service for agent SDKs
 After=network.target
 
 [Service]
@@ -97,8 +101,8 @@ Type=simple
 ExecStart=${nodePath} ${daemonPath}
 Restart=always
 RestartSec=10
-StandardOutput=file:/tmp/cc-ys.log
-StandardError=file:/tmp/cc-ys.error.log
+StandardOutput=file:${getLogPath()}
+StandardError=file:${getErrorLogPath()}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(homedir(), ".local", "bin")}
 EnvironmentFile=${CLAUDE_ENV_PATH}
 
@@ -110,7 +114,7 @@ WantedBy=default.target
 export interface DaemonStatus {
   installed: boolean;
   running: boolean;
-  platform: "macos" | "linux" | "unsupported";
+  platform: "macos" | "linux" | "windows" | "unsupported";
 }
 
 /**
@@ -122,6 +126,9 @@ export function isDaemonInstalled(): boolean {
   }
   if (isLinux) {
     return existsSync(getSystemdServicePath());
+  }
+  if (isWindows) {
+    return existsSync(getWindowsMarkerPath());
   }
   return false;
 }
@@ -155,9 +162,33 @@ export async function installDaemon(): Promise<{ success: boolean; message: stri
     };
   }
 
+  if (isWindows) {
+    ensureRuntimeDir();
+    ensureClaudeEnvFile();
+    writeFileSync(
+      getWindowsMarkerPath(),
+      JSON.stringify(
+        {
+          node: getNodePath(),
+          daemon: getDaemonScriptPath(),
+          log: getLogPath(),
+          errorLog: getErrorLogPath(),
+          envFile: CLAUDE_ENV_PATH,
+        },
+        null,
+        2
+      )
+    );
+
+    return {
+      success: true,
+      message: `Windows background runner configured at ${getWindowsMarkerPath()}`,
+    };
+  }
+
   return {
     success: false,
-    message: "Unsupported platform. Only macOS and Linux are supported.",
+    message: "Unsupported platform. macOS, Linux, and Windows are supported.",
   };
 }
 
@@ -198,6 +229,24 @@ export async function uninstallDaemon(): Promise<{ success: boolean; message: st
     return {
       success: true,
       message: "Systemd service uninstalled",
+    };
+  }
+
+  if (isWindows) {
+    await stopDaemon();
+    const markerPath = getWindowsMarkerPath();
+    const pidPath = getPidPath();
+
+    if (existsSync(markerPath)) {
+      unlinkSync(markerPath);
+    }
+    if (existsSync(pidPath)) {
+      unlinkSync(pidPath);
+    }
+
+    return {
+      success: true,
+      message: "Windows background runner uninstalled",
     };
   }
 
@@ -248,7 +297,7 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
 
       return {
         success: true,
-        message: "Daemon started. Logs: /tmp/cc-ys.log",
+        message: `Daemon started. Logs: ${getLogPath()}`,
       };
     } catch (err) {
       return {
@@ -268,13 +317,53 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
 
       return {
         success: true,
-        message: "Daemon started. Logs: /tmp/cc-ys.log",
+        message: `Daemon started. Logs: ${getLogPath()}`,
       };
     } catch (err) {
       return {
         success: false,
         message: `Failed to start: ${err}`,
       };
+    }
+  }
+
+  if (isWindows) {
+    ensureRuntimeDir();
+    const currentPid = readPidFile();
+    if (currentPid && isProcessRunning(currentPid)) {
+      return {
+        success: true,
+        message: `Daemon already running. Logs: ${getLogPath()}`,
+      };
+    }
+
+    const { spawn } = await import("child_process");
+    const outFd = openSync(getLogPath(), "a");
+    const errFd = openSync(getErrorLogPath(), "a");
+
+    try {
+      const child = spawn(getNodePath(), [getDaemonScriptPath()], {
+        detached: true,
+        stdio: ["ignore", outFd, errFd],
+        windowsHide: true,
+        env: { ...process.env, ...readClaudeEnvFile() },
+      });
+
+      child.unref();
+      writeFileSync(getPidPath(), String(child.pid));
+
+      return {
+        success: true,
+        message: `Daemon started. Logs: ${getLogPath()}`,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        message: `Failed to start: ${err}`,
+      };
+    } finally {
+      closeSync(outFd);
+      closeSync(errFd);
     }
   }
 
@@ -293,7 +382,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
     // Step 1: Kill daemon processes first (while launchd is still managing)
     try {
-      execSync("pkill -9 -f 'node.*cc-ys.*daemon.js'", { stdio: "ignore" });
+      execSync("pkill -9 -f 'node.*raven-ts.*daemon.js'", { stdio: "ignore" });
     } catch {
       // Ignore if no process to kill
     }
@@ -322,7 +411,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
     let stillRunning = false;
     try {
-      const result = execSync("pgrep -f 'node.*cc-ys.*daemon.js'", {
+      const result = execSync("pgrep -f 'node.*raven-ts.*daemon.js'", {
         encoding: "utf-8",
         stdio: ["pipe", "pipe"],
       });
@@ -335,7 +424,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
     if (stillRunning) {
     // Force kill any remaining
     try {
-      execSync("pkill -9 -f 'node.*cc-ys.*daemon.js'", { stdio: "ignore" });
+      execSync("pkill -9 -f 'node.*raven-ts.*daemon.js'", { stdio: "ignore" });
     } catch {
       // Ignore
     }
@@ -362,6 +451,26 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
     };
   }
 
+  if (isWindows) {
+    const pid = readPidFile();
+    if (pid && isProcessRunning(pid)) {
+      try {
+        process.kill(pid);
+      } catch {
+        // Ignore errors. Status will report if the process is still running.
+      }
+    }
+
+    if (existsSync(getPidPath())) {
+      unlinkSync(getPidPath());
+    }
+
+    return {
+      success: true,
+      message: "Daemon stopped",
+    };
+  }
+
   return {
     success: false,
     message: "Unsupported platform",
@@ -372,9 +481,9 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
  * Get daemon status
  */
 export async function getDaemonStatus(): Promise<DaemonStatus> {
-  const platformName = isMacOS ? "macos" : isLinux ? "linux" : "unsupported";
+  const platformName = isMacOS ? "macos" : isLinux ? "linux" : isWindows ? "windows" : "unsupported";
 
-  if (!isMacOS && !isLinux) {
+  if (!isMacOS && !isLinux && !isWindows) {
     return {
       installed: false,
       running: false,
@@ -412,9 +521,66 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
     }
   }
 
+  if (isWindows && installed) {
+    const pid = readPidFile();
+    running = pid !== undefined && isProcessRunning(pid);
+  }
+
   return {
     installed,
     running,
     platform: platformName,
   };
+}
+
+function readPidFile(): number | undefined {
+  try {
+    const pid = Number.parseInt(readFileSync(getPidPath(), "utf-8").trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err && typeof err === "object" && "code" in err && err.code === "EPERM") {
+      return true;
+    }
+    return false;
+  }
+}
+
+function readClaudeEnvFile(): NodeJS.ProcessEnv {
+  if (!existsSync(CLAUDE_ENV_PATH)) {
+    return {};
+  }
+
+  const env: NodeJS.ProcessEnv = {};
+  for (const line of readFileSync(CLAUDE_ENV_PATH, "utf-8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, equalsIndex);
+    env[key] = unquoteEnvValue(trimmed.slice(equalsIndex + 1));
+  }
+
+  return env;
+}
+
+function unquoteEnvValue(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+  return value;
 }

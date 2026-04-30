@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 
 /**
- * Daemon entry point for cc-ys background service.
+ * Daemon entry point for raven-ts background service.
  * This is the script that gets run by launchd/systemd.
  */
 
 import chalk from "chalk";
-import { isConfigured, getFeishuConfig, getClaudeConfig } from "./config.js";
+import { isConfigured, getAgentProvider, getFeishuConfig, getClaudeConfig } from "./config.js";
 import { startFeishuListener } from "./feishu/handler.js";
 import { handleFeishuMessage } from "./feishu/handler.js";
 
 async function main(): Promise<void> {
-  console.log(chalk.cyan("cc-ys daemon starting..."));
+  console.log(chalk.cyan("raven-ts daemon starting..."));
   console.log(`PID: ${process.pid}`);
   console.log(`Started at: ${new Date().toISOString()}`);
   console.log();
 
   if (!isConfigured()) {
-    console.error("Error: Not configured. Run 'cc-ys init' first.");
+    console.error("Error: Not configured. Run 'raven-ts init' first.");
     process.exit(1);
   }
 
@@ -26,6 +26,7 @@ async function main(): Promise<void> {
 
   console.log(`Feishu App ID: ${feishuConfig.appId}`);
   console.log(`Domain: ${feishuConfig.domain}`);
+  console.log(`Agent: ${getAgentProvider()}`);
   console.log(`Working Dir: ${claudeConfig.defaultWorkDir}`);
   console.log();
 
@@ -55,7 +56,7 @@ async function main(): Promise<void> {
     });
 
     console.log(`Connected! Bot ID: ${botOpenId}`);
-    console.log("cc-ys daemon is running.\n");
+    console.log("raven-ts daemon is running.\n");
 
     // Keep process alive
     await new Promise(() => {});

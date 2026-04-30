@@ -42,13 +42,21 @@ export function createEventDispatcher(config: FeishuConfig): Lark.EventDispatche
   });
 }
 
+export function isDebugEventsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    env.RAVEN_TS_DEBUG_EVENTS === "1" ||
+    env.RAVEN_DEBUG_EVENTS === "1" ||
+    env.CC_YS_DEBUG_EVENTS === "1"
+  );
+}
+
 /**
  * Parse message content from Feishu event
  * The SDK passes the event directly as { sender, message }
  */
 export function parseMessageContent(event: unknown): MessageEvent | null {
   try {
-    if (process.env.CC_YS_DEBUG_EVENTS === "1") {
+    if (isDebugEventsEnabled()) {
       console.log("[Debug] Parsing event:", JSON.stringify(event, null, 2));
     }
 
@@ -81,7 +89,7 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
     const sender = data?.sender;
 
     if (!message) {
-      if (process.env.CC_YS_DEBUG_EVENTS === "1") {
+      if (isDebugEventsEnabled()) {
         console.log("[Debug] No message field in event");
       }
       return null;

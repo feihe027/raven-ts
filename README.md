@@ -1,37 +1,41 @@
-# cc-ys
+# raven-ts
 
-`cc-ys` 是一个把 Feishu 机器人接到 Claude Agent SDK 和 Codex app-server 的本地控制服务。用户在飞书里发送消息，`cc-ys` 通过 WebSocket 长连接接收事件，把请求交给当前配置的智能体执行，再把结果回复到飞书。
+`raven-ts` is a local Feishu/Lark bot service for controlling Claude Agent SDK and Codex app-server from chat.
 
-当前主线能力包括：
+Users send messages in Feishu/Lark. `raven-ts` receives them through the bot WebSocket event stream, runs the configured agent backend, and replies with a message card.
 
-- 支持 Claude 和 Codex 两个后端，可在飞书里切换。
-- Codex 使用 `ai-sdk-provider-codex-app-server`，通过 app-server stdio 通讯。
-- Codex runtime 长生命周期缓存，避免每轮请求都重启 app-server。
-- Codex 执行中支持 `session.injectMessage(...)` 注入新指令。
-- 每个飞书 `chat_id` 维护独立工作目录和智能体会话绑定。
-- Windows 后台运行，包含 PID、日志、状态检查和隐藏控制台窗口处理。
-- message-id 去重和短窗口 content 去重，避免飞书重复投递导致重复回复。
+## Features
 
-## 工作方式
+- Claude and Codex backends.
+- Runtime switching from chat with `/r claude` and `/r codex`.
+- Codex app-server through `ai-sdk-provider-codex-app-server`.
+- Codex app-server runs over provider-managed stdio.
+- Long-lived Codex runtime cache, so Codex is not restarted after every turn.
+- Mid-run Codex instruction injection through `session.injectMessage(...)`.
+- Per-chat work directory and agent session binding.
+- Windows background service with PID, logs, status, and hidden console windows.
+- Duplicate Feishu/Lark event protection with message-id dedup and a short content dedup window.
+
+## Message Flow
 
 ```text
-Feishu message
-  -> WebSocket event im.message.receive_v1
-  -> cc-ys daemon
+Feishu/Lark message
+  -> im.message.receive_v1 over WebSocket
+  -> raven-ts daemon
   -> Claude Agent SDK or Codex app-server
-  -> Feishu reply card
+  -> Feishu/Lark reply card
 ```
 
-Claude 的上下文由 Claude SDK session 管理。Codex 的上下文由 Codex thread 管理。`cc-ys` 只保存飞书会话、本地工作目录、Claude session id 和 Codex thread id 的绑定关系。
+Claude context is managed by Claude SDK sessions. Codex context is managed by Codex threads. `raven-ts` stores only local metadata: chat id, work directory, Claude session id, and Codex thread id.
 
-## 环境要求
+## Requirements
 
 - Node.js >= 18
 - npm
-- 一个 Feishu/Lark 自建应用机器人
-- Claude 或 Codex 所需认证环境变量
+- A Feishu/Lark self-built bot app
+- Auth environment variables required by Claude and/or Codex
 
-常见环境变量：
+Common variables:
 
 ```sh
 ANTHROPIC_AUTH_TOKEN=...
@@ -41,75 +45,71 @@ OPENAI_API_KEY=...
 CODEX_...
 ```
 
-后台服务会读取 `cc-ys` 写入的环境文件：
+The background service imports variables from:
 
 ```text
-%LOCALAPPDATA%\cc-ys\claude.env
+%LOCALAPPDATA%\raven-ts\claude.env
 ```
 
-虽然文件名保留为 `claude.env`，当前也会保存 `OPENAI_*` 和 `CODEX_*` 变量。
+The file name is kept for compatibility, but it can contain `ANTHROPIC_*`, `OPENAI_*`, and `CODEX_*`.
 
-## 安装
+## Install
 
 ```sh
 npm install
 npm run build
 ```
 
-查看状态：
+Run the CLI locally:
 
 ```sh
 node dist/cli.js status
 ```
 
-如果需要全局命令：
+Optional global link:
 
 ```sh
 npm link
-cc-ys status
+raven-ts status
 ```
 
-## 初始化
+## Initialize
 
 ```sh
-cc-ys init
+raven-ts init
 ```
 
-初始化会询问：
+The init command asks for:
 
 - Feishu/Lark domain
-- agent backend: `claude` 或 `codex`
-- App ID / App Secret
-- Verification Token / Encrypt Key
-- 默认工作目录
-- Claude max turns / timeout
-- Codex binary path，可留空使用 provider 默认
-- 是否启动后台服务
+- agent backend: `claude` or `codex`
+- App ID and App Secret
+- optional Verification Token and Encrypt Key
+- default work directory
+- Claude max turns and timeout
+- optional Codex binary path
+- whether to start the background service
 
-配置文件路径：
-
-```sh
-cc-ys config path
-```
-
-查看配置：
+Show config:
 
 ```sh
-cc-ys config list
+raven-ts config list
+raven-ts config path
 ```
 
-## Feishu/Lark 配置要点
+## Feishu/Lark Setup
 
-在开放平台创建自建应用后：
+In the Feishu/Lark developer console:
 
-1. 启用机器人能力。
-2. 开通发送消息和接收消息相关权限。
-3. 在事件订阅里选择“使用长连接接收事件”。
-4. 添加事件 `im.message.receive_v1`。
-5. 发布或安装应用到企业/租户。
-6. 把机器人加入目标私聊或群聊。
+1. Create a self-built app.
+2. Enable bot capability.
+3. Enable permissions for receiving and sending messages.
+4. Enable event subscription through long connection.
+5. Add `im.message.receive_v1`.
+6. Publish or install the app.
+7. Add the bot to the target chat.
 
-常见权限 scope 包括：
+Common permission scopes include:
 
 ```text
 im:message:send_as_bot
@@ -119,68 +119,66 @@ im:message.group_msg
 im:message:readonly
 ```
 
-不同租户后台显示名称可能不同，以 Feishu/Lark 后台提示为准。
+Exact names may differ by tenant. Follow the developer console prompts when adding `im.message.receive_v1`.
 
-## 启动和日志
+## Start And Logs
 
-前台调试：
-
-```sh
-cc-ys start --foreground
-```
-
-后台运行：
+Foreground mode:
 
 ```sh
-cc-ys start
-cc-ys stop
-cc-ys status
+raven-ts start --foreground
 ```
 
-查看日志：
+Background service:
 
 ```sh
-cc-ys logs
-cc-ys logs --follow
+raven-ts start
+raven-ts stop
+raven-ts status
 ```
 
-Windows 日志默认在：
+Logs:
+
+```sh
+raven-ts logs
+raven-ts logs --follow
+```
+
+Windows log paths:
 
 ```text
-%LOCALAPPDATA%\cc-ys\cc-ys.log
-%LOCALAPPDATA%\cc-ys\cc-ys.error.log
+%LOCALAPPDATA%\raven-ts\raven-ts.log
+%LOCALAPPDATA%\raven-ts\raven-ts.error.log
 ```
 
-## 飞书命令
+## Chat Commands
 
-在飞书聊天里发送：
+Send commands in Feishu/Lark:
 
 ```text
-/cc help
+/r help
+/r cd <path>
+/r pwd
+/r clear
+/r status
+/r agent
+/r agent claude
+/r agent codex
+/r claude
+/r codex
+/r restart
 ```
 
-可用命令：
+Command behavior:
 
-```text
-/cc cd <path>              切换当前聊天的工作目录，并清理上下文
-/cc pwd                    显示当前工作目录
-/cc clear                  清理当前聊天的智能体会话
-/cc status                 显示当前聊天状态
-/cc agent                  显示当前智能体
-/cc agent claude           切换到 Claude
-/cc agent codex            切换到 Codex
-/cc claude                 快捷切换到 Claude
-/cc codex                  快捷切换到 Codex
-/cc restart                重启当前聊天的 Codex runtime
-```
-
-`/cc cd <path>` 会创建新会话。这样可以避免切换目录后继续沿用旧项目上下文。
-
-`/cc restart` 只释放当前聊天的 Codex app-server runtime；下一次 Codex 请求会重新启动 app-server，并继续使用保存的 Codex thread。需要完全新上下文时使用 `/cc clear`。
+- `/r cd <path>` changes the work directory and clears the current agent context.
+- `/r clear` clears the current chat's agent session while keeping the work directory.
+- `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new app-server and resumes the saved thread.
+- `/r claude` and `/r codex` switch the backend.
 
 ## Codex
 
-Codex 当前通过：
+Codex is called through:
 
 ```ts
 createCodexAppServer(...)
@@ -188,124 +186,114 @@ streamText(...)
 session.injectMessage(...)
 ```
 
-运行方式是 provider 管理的 app-server over stdio。项目代码不直接手写 `spawn("codex", ...)` 作为业务调用方式。
+The application code does not manually implement Codex JSON-RPC. The provider manages the local app-server process and stdio transport.
 
-默认模型：
+Default model:
 
 ```text
 gpt-5.3-codex
 ```
 
-修改 Codex 配置：
+Config examples:
 
 ```sh
-cc-ys config set agent.provider codex
-cc-ys config set codex.model gpt-5.3-codex
-cc-ys config set codex.reasoningEffort medium
-cc-ys config set codex.timeoutMs 300000
-cc-ys config set codex.networkAccessEnabled true
-cc-ys config set codex.codexBin C:\path\to\codex.cmd
+raven-ts config set agent.provider codex
+raven-ts config set codex.model gpt-5.3-codex
+raven-ts config set codex.reasoningEffort medium
+raven-ts config set codex.timeoutMs 300000
+raven-ts config set codex.networkAccessEnabled true
+raven-ts config set codex.codexBin C:\path\to\codex.cmd
 ```
 
-恢复默认 Codex binary：
+Reset Codex binary to provider default:
 
 ```sh
-cc-ys config set codex.codexBin default
+raven-ts config set codex.codexBin default
 ```
 
-Codex 执行中如果同一个飞书会话又收到新消息，`cc-ys` 会调用 `session.injectMessage(...)` 注入到当前运行中的 Codex turn，而不是新开第二个 Codex 执行。
+If a second message arrives in the same chat while Codex is still active, `raven-ts` injects the new instruction into the active Codex session instead of starting another run.
 
 ## Claude
 
-修改 Claude 配置：
+Config examples:
 
 ```sh
-cc-ys config set agent.provider claude
-cc-ys config set claude.defaultWorkDir C:\repo\project
-cc-ys config set claude.maxTurns 20
-cc-ys config set claude.timeoutMs 300000
+raven-ts config set agent.provider claude
+raven-ts config set claude.defaultWorkDir C:\repo\project
+raven-ts config set claude.maxTurns 20
+raven-ts config set claude.timeoutMs 300000
 ```
 
-Claude 执行结果会保存 `claudeSessionId`，后续消息默认 resume 同一会话。
+Claude responses store a `claudeSessionId` and later messages resume that SDK session.
 
-## Windows
+## Windows Notes
 
-Windows 下 `cc-ys start` 会启动一个后台 Node daemon，并将 PID 和日志写入 `%LOCALAPPDATA%\cc-ys`。
+`raven-ts start` runs a background Node daemon and stores runtime files in:
 
-为了避免弹出控制台窗口：
+```text
+%LOCALAPPDATA%\raven-ts
+```
 
-- `cc-ys` daemon spawn 使用 `windowsHide: true`。
-- Codex provider 的 app-server spawn 也通过 `scripts/patch-codex-provider.js` 补上 `windowsHide: true`。
-- `postinstall` 会在 `npm install` 后重新应用这个 provider 补丁。
+Console windows are hidden by:
 
-## 常见问题
+- `windowsHide: true` for the raven-ts daemon.
+- A postinstall patch for `ai-sdk-provider-codex-app-server`, adding `windowsHide: true` to Codex app-server spawn calls.
 
-### 飞书没有响应
+The patch script is:
 
-先看日志是否收到消息：
+```text
+scripts/patch-codex-provider.js
+```
+
+## Migration From raven Or cc-ys
+
+`raven-ts` can migrate existing `raven` and `cc-ys` local data:
+
+- config from the old `raven` or `cc-ys` Conf project
+- sessions from `~/.raven/sessions` or `~/.cc-ys/sessions`
+- runtime auth env from `%LOCALAPPDATA%\raven\claude.env` or `%LOCALAPPDATA%\cc-ys\claude.env`
+
+After migration, new runtime files use the `raven-ts` paths.
+
+The chat command prefix changed:
+
+```text
+/cc -> /r
+```
+
+The debug environment variable is now `RAVEN_TS_DEBUG_EVENTS`; `RAVEN_DEBUG_EVENTS` and `CC_YS_DEBUG_EVENTS` remain supported for compatibility.
+
+## Troubleshooting
+
+If Feishu/Lark does not reply, check whether messages are received:
 
 ```sh
-cc-ys logs
+raven-ts logs
 ```
 
-如果没有 `[Message ...]`，优先检查 Feishu/Lark 事件订阅、权限、应用发布状态和机器人是否加入会话。
+If there is no `[Message ...]` line, check bot permissions, event subscription, app publish/install state, and whether the bot is in the chat.
 
-如果有 `[Message ...]` 但没有回复，查看错误日志：
+If Codex looks stuck:
+
+```text
+/r restart
+```
+
+If you need a clean context:
+
+```text
+/r clear
+```
+
+If config changes do not take effect:
 
 ```sh
-cc-ys logs --follow
+raven-ts stop
+raven-ts start
 ```
 
-或直接查看：
+## Current Limits
 
-```text
-%LOCALAPPDATA%\cc-ys\cc-ys.error.log
-```
-
-### 连续两次相同消息没有响应
-
-`cc-ys` 会按 message-id 去重，并对相同内容做 2 秒短窗口去重。正常人工连续发送同样内容，只要间隔超过 2 秒，不会被丢弃。
-
-日志会区分：
-
-```text
-Duplicate message-id
-Duplicate content
-```
-
-### Codex 状态异常
-
-先在飞书里执行：
-
-```text
-/cc restart
-```
-
-如果需要完全新上下文：
-
-```text
-/cc clear
-```
-
-然后重新发送请求。
-
-### 修改配置后没有生效
-
-配置修改后建议重启服务：
-
-```sh
-cc-ys stop
-cc-ys start
-```
-
-## 当前限制
-
-- 飞书图片/截图消息还没有接入 Codex 图片输入。
-- `codex app-server --listen stdio://` 由 provider 内部以 stdio pipe 方式实现；当前 provider 没有暴露额外 app-server 参数。
-- `node_modules` 里的 Codex provider 隐藏窗口补丁依赖 `postinstall` 重新应用。
-
-## 相关链接
-
-- Feishu 开放平台：https://open.feishu.cn/app
-- Feishu 接收消息事件：https://open.feishu.cn/document/server-docs/im-v1/message/events/receive
-- Feishu 回复消息 API：https://open.feishu.cn/document/server-docs/im-v1/message/reply
+- Feishu/Lark image and screenshot messages are not yet passed to Codex image input.
+- Explicit `codex app-server --listen stdio://` is not exposed by the current provider. The provider starts Codex app-server with stdio pipes internally.
+- The provider window-hiding patch is applied through `postinstall`, because the upstream provider does not currently set `windowsHide`.

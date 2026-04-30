@@ -1,11 +1,11 @@
 {
-  "name": "cc-ys",
+  "name": "raven-ts",
   "version": "0.1.0",
   "description": "Feishu/Lark control service for Claude and Codex Agent SDKs",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "cc-ys": "dist/cli.js"
+    "raven-ts": "dist/cli.js"
   },
   "files": [
     "dist",
