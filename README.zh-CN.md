@@ -101,15 +101,21 @@ raven-ts config path
 
 ## 飞书/Lark 配置
 
-在飞书/Lark 开发者后台中：
+飞书官方的「应用配置说明」可作为参考：
+https://open.feishu.cn/document/develop-a-card-interactive-bot/faqs
 
-1. 创建自建应用。
-2. 启用机器人能力。
-3. 启用接收和发送消息所需权限。
-4. 启用长连接事件订阅。
-5. 添加 `im.message.receive_v1` 事件。
-6. 发布或安装应用。
-7. 将机器人添加到目标聊天。
+对 `raven-ts` 来说，在飞书/Lark 开发者后台按以下方式配置自建应用：
+
+1. 创建自建应用，然后在 **基础信息 > 凭证与基础信息** 中复制 **App ID** 和 **App Secret**，填入 `raven-ts init`。
+2. 在 **应用能力** 中添加 **机器人** 能力。没有机器人能力时，应用不能接收消息，也不能以机器人身份回复。
+3. 在 **开发配置 > 权限管理 > API 权限** 中申请接收和发送消息所需的应用身份权限。
+4. 先启动一次 `raven-ts`，让应用建立长连接：
+   ```sh
+   raven-ts start --foreground
+   ```
+5. 在 **开发配置 > 事件与回调 > 事件配置** 中，将订阅方式设置为 **使用长连接接收事件**，并在 `raven-ts` 正在运行时保存。
+6. 添加 **接收消息** 事件：`im.message.receive_v1`。
+7. 创建并发布新的应用版本，在租户中安装或更新应用，然后将机器人添加到目标聊天。
 
 常见权限范围包括：
 
@@ -121,7 +127,9 @@ im:message.group_msg
 im:message:readonly
 ```
 
-不同租户中的权限名称可能略有差异。添加 `im.message.receive_v1` 时，以开发者后台提示为准。
+不同租户中的权限名称可能略有差异。单聊需要 `im:message.p2p_msg:readonly`；群聊通常至少需要开发者后台提示的群消息权限，例如用于 @ 机器人的 `im:message.group_at_msg:readonly`；机器人回复需要 `im:message:send_as_bot`。
+
+官方卡片交互机器人教程还会配置机器人菜单、`application.bot.menu_v6`、`im.chat.access_event.bot_p2p_chat_entered_v1` 和 `card.action.trigger`。这些只在你要扩展自定义菜单或交互式卡片回调时需要。普通 `raven-ts` 聊天控制只需要机器人能力、消息收发权限、长连接事件订阅和 `im.message.receive_v1`。
 
 ## 启动和日志
 

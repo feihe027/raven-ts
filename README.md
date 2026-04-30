@@ -101,15 +101,21 @@ raven-ts config path
 
 ## Feishu/Lark Setup
 
-In the Feishu/Lark developer console:
+The official Feishu/Lark "App configuration instructions" for card interactive bots are a useful reference:
+https://open.feishu.cn/document/develop-a-card-interactive-bot/faqs
 
-1. Create a self-built app.
-2. Enable bot capability.
-3. Enable permissions for receiving and sending messages.
-4. Enable event subscription through long connection.
-5. Add `im.message.receive_v1`.
-6. Publish or install the app.
-7. Add the bot to the target chat.
+For `raven-ts`, configure the self-built app as follows in the Feishu/Lark developer console:
+
+1. Create a self-built app, then copy its **App ID** and **App Secret** from **Basic information > Credentials & Basic Info** into `raven-ts init`.
+2. In **App capabilities**, add the **Bot** capability. This is required before the app can receive messages or send replies as a bot.
+3. In **Develop configuration > Permissions > API permissions**, add the application permissions needed for message receive/send.
+4. Start `raven-ts` once so the app establishes a long connection:
+   ```sh
+   raven-ts start --foreground
+   ```
+5. In **Develop configuration > Events and callbacks > Event configuration**, set the subscription method to **Receive events through long connection** and save it while `raven-ts` is running.
+6. Add the **Receive message** event: `im.message.receive_v1`.
+7. Publish a new app version, install or update it in the tenant, and add the bot to the target chat.
 
 Common permission scopes include:
 
@@ -121,7 +127,9 @@ im:message.group_msg
 im:message:readonly
 ```
 
-Exact names may differ by tenant. Follow the developer console prompts when adding `im.message.receive_v1`.
+Exact names may differ by tenant. For direct messages, `im:message.p2p_msg:readonly` is required. For group chats, enable the group message permission prompted by the developer console, commonly `im:message.group_at_msg:readonly` for @-mentions. `im:message:send_as_bot` is required for replies.
+
+The official card-interactive-bot tutorial also configures bot menus, `application.bot.menu_v6`, `im.chat.access_event.bot_p2p_chat_entered_v1`, and `card.action.trigger`. Those are only needed if you add custom bot menus or interactive card callbacks. Plain `raven-ts` chat control only requires the bot capability, send/receive message permissions, long-connection event subscription, and `im.message.receive_v1`.
 
 ## Start And Logs
 
