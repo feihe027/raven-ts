@@ -1,5 +1,7 @@
 # raven-ts
 
+**Language:** English | [简体中文](README.zh-CN.md)
+
 `raven-ts` is a local Feishu/Lark bot service for controlling Claude Agent SDK and Codex app-server from chat.
 
 Users send messages in Feishu/Lark. `raven-ts` receives them through the bot WebSocket event stream, runs the configured agent backend, and replies with a message card.
