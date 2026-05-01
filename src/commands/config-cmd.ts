@@ -89,7 +89,7 @@ function showConfig(): void {
 
   console.log(chalk.bold("Codex:"));
   console.log(`  model: ${codex.model || "gpt-5.3-codex"}`);
-  console.log(`  codexBin: ${codex.codexBin || "(provider default)"}`);
+  console.log(`  codexBin: ${codex.codexBin || "(SDK default)"}`);
   console.log(`  reasoningEffort: ${codex.reasoningEffort}`);
   console.log(`  timeoutMs: ${codex.timeoutMs}`);
   console.log(`  skipGitRepoCheck: ${codex.skipGitRepoCheck}`);

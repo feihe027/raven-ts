@@ -74,7 +74,7 @@ export async function statusCommand(): Promise<void> {
   const codexConfig = getCodexConfig();
   console.log(`  Codex runtime: ${getCodexRuntimeDescription()}`);
   console.log(`  Codex model: ${codexConfig.model || "gpt-5.3-codex"}`);
-  console.log(`  Codex binary: ${codexConfig.codexBin || "(provider default)"}`);
+  console.log(`  Codex binary: ${codexConfig.codexBin || "(SDK default)"}`);
   console.log(`  Codex reasoning: ${codexConfig.reasoningEffort}`);
   console.log(`  Codex timeout: ${codexConfig.timeoutMs}ms`);
   console.log();

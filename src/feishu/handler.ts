@@ -356,7 +356,7 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
       await replyToMessage(
         context.client,
         event.messageId,
-        "Codex runtime restarted for this chat. The next Codex request will start a new app-server and resume the saved thread."
+        "Codex runtime restarted for this chat. The next Codex request will start a new SDK runner and resume the saved thread."
       );
       break;
     }
@@ -579,6 +579,11 @@ async function handleCodexRequest(
     setCodexThreadId(session, result.codexThreadId);
   }
   markPromptFinished(session);
+
+  if (result.busy) {
+    await replyToMessage(context.client, event.messageId, result.error || "Codex is already running.");
+    return;
+  }
 
   if (result.injected) {
     try {

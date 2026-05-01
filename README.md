@@ -2,7 +2,7 @@
 
 **Language:** English | [简体中文](README.zh-CN.md)
 
-`raven-ts` is a local Feishu/Lark bot service for controlling Claude Agent SDK and Codex app-server from chat.
+`raven-ts` is a local Feishu/Lark bot service for controlling Claude Agent SDK and Codex SDK from chat.
 
 Users send messages in Feishu/Lark. `raven-ts` receives them through the bot WebSocket event stream, runs the configured agent backend, and replies with a message card.
 
@@ -10,10 +10,9 @@ Users send messages in Feishu/Lark. `raven-ts` receives them through the bot Web
 
 - Claude and Codex backends.
 - Runtime switching from chat with `/r claude` and `/r codex`.
-- Codex app-server through `ai-sdk-provider-codex-app-server`.
-- Codex app-server runs over provider-managed stdio.
-- Long-lived Codex runtime cache, so Codex is not restarted after every turn.
-- Mid-run Codex instruction injection through `session.injectMessage(...)`.
+- Codex through the official `@openai/codex-sdk` `runStreamed()` API.
+- Codex streams text in real time and reads token usage from the final `turn.completed` event.
+- Codex thread IDs are persisted per chat, so context is resumed across turns.
 - Claude per-chat queueing, plus `!prompt` interrupt-and-run behavior inspired by `agent-feishu-channel`.
 - `/r stop` to stop the active run and clear queued Claude prompts.
 - Successful replies now include token usage at the bottom of the reply card, with input/output/total counts.
@@ -27,7 +26,7 @@ Users send messages in Feishu/Lark. `raven-ts` receives them through the bot Web
 Feishu/Lark message
   -> im.message.receive_v1 over WebSocket
   -> raven-ts daemon
-  -> Claude Agent SDK or Codex app-server
+  -> Claude Agent SDK or Codex SDK
   -> Feishu/Lark reply card
 ```
 
@@ -188,7 +187,7 @@ Command behavior:
 - `/r stop` stops the active run. For Claude it also clears queued prompts.
 - `/r cd <path>` changes the work directory and clears the current agent context.
 - `/r clear` clears the current chat's agent session while keeping the work directory.
-- `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new app-server and resumes the saved thread.
+- `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new SDK runner and resumes the saved thread.
 - `/r claude` and `/r codex` switch the backend.
 - `!your message` interrupts the current run and starts a fresh run with the new prompt.
 
@@ -197,12 +196,12 @@ Command behavior:
 Codex is called through:
 
 ```ts
-createCodexAppServer(...)
-streamText(...)
-session.injectMessage(...)
+const thread = codex.resumeThread(...)
+const { events } = await thread.runStreamed(...)
+// event.type === "turn.completed" contains event.usage
 ```
 
-The application code does not manually implement Codex JSON-RPC. The provider manages the local app-server process and stdio transport.
+The application code uses the official Codex SDK and reads usage from the completed turn event.
 
 Default model:
 
@@ -221,13 +220,13 @@ raven-ts config set codex.networkAccessEnabled true
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
 ```
 
-Reset Codex binary to provider default:
+Reset Codex binary to SDK default:
 
 ```sh
 raven-ts config set codex.codexBin default
 ```
 
-If a second message arrives in the same chat while Codex is still active, `raven-ts` injects the new instruction into the active Codex session instead of starting another run.
+If a second message arrives in the same chat while Codex is still active, `raven-ts` replies that Codex is busy. Use `!your message` to interrupt the current turn and start a fresh run.
 
 ## Claude
 
@@ -254,12 +253,12 @@ If a second message arrives while Claude is still running, `raven-ts` queues it 
 Console windows are hidden by:
 
 - `windowsHide: true` for the raven-ts daemon.
-- A postinstall patch for `ai-sdk-provider-codex-app-server`, adding `windowsHide: true` to Codex app-server spawn calls.
+- A postinstall patch for `@openai/codex-sdk`, adding `windowsHide: true` to Codex CLI spawn calls.
 
 The patch script is:
 
 ```text
-scripts/patch-codex-provider.js
+scripts/patch-codex-sdk.js
 ```
 
 ## Migration From raven Or cc-ys
@@ -312,5 +311,5 @@ raven-ts start
 ## Current Limits
 
 - Feishu/Lark image and screenshot messages are not yet passed to Codex image input.
-- Explicit `codex app-server --listen stdio://` is not exposed by the current provider. The provider starts Codex app-server with stdio pipes internally.
-- The provider window-hiding patch is applied through `postinstall`, because the upstream provider does not currently set `windowsHide`.
+- Official Codex SDK does not expose mid-turn instruction injection; use `!prompt` to interrupt and replace an active turn.
+- The Codex SDK window-hiding patch is applied through `postinstall`, because the upstream SDK does not currently set `windowsHide`.

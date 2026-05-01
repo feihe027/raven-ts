@@ -1,9 +1,11 @@
-import { streamText } from "ai";
 import {
-  createCodexAppServer,
-  type ReasoningEffort,
-  type Session,
-} from "ai-sdk-provider-codex-app-server";
+  Codex,
+  type ModelReasoningEffort,
+  type Thread,
+  type ThreadItem,
+  type ThreadOptions,
+  type Usage,
+} from "@openai/codex-sdk";
 import type { CodexConfig } from "../config.js";
 
 export interface ExecuteCodexResult {
@@ -13,6 +15,7 @@ export interface ExecuteCodexResult {
   duration: number;
   codexThreadId?: string;
   injected?: boolean;
+  busy?: boolean;
   interrupted?: boolean;
   interruptReason?: "stop" | "bang_prefix";
   inputTokens?: number;
@@ -28,21 +31,18 @@ export interface ExecuteCodexOptions {
 }
 
 interface ActiveRun {
-  session?: Session;
+  abortController: AbortController;
   startedAt: number;
+  codexThreadId?: string;
   interruptReason?: "stop" | "bang_prefix";
 }
 
 interface CachedRuntime {
-  model: DisposableLanguageModel;
+  codex: Codex;
+  thread: Thread;
   signature: string;
   startedAt: number;
-  currentSession?: Session;
-  onCurrentSession?: (session: Session) => void;
-}
-
-interface DisposableLanguageModel {
-  dispose?: () => void;
+  threadId?: string;
 }
 
 const activeRuns = new Map<string, ActiveRun>();
@@ -58,56 +58,91 @@ export async function executeCodex(
   prompt: string,
   options: ExecuteCodexOptions
 ): Promise<ExecuteCodexResult> {
-  const activeRun = activeRuns.get(options.conversationId);
-  if (activeRun?.session?.isActive()) {
-    await activeRun.session.injectMessage(prompt);
+  const existingRun = activeRuns.get(options.conversationId);
+  if (existingRun) {
     return {
-      success: true,
-      output: "Instruction injected into the active Codex run.",
-      duration: Date.now() - activeRun.startedAt,
-      codexThreadId: activeRun.session.threadId,
-      injected: true,
+      success: false,
+      output: "",
+      error: "Codex is already running. Use !message to interrupt it, or wait for the current run to finish.",
+      duration: Date.now() - existingRun.startedAt,
+      codexThreadId: existingRun.codexThreadId ?? options.resumeThreadId,
+      busy: true,
     };
   }
 
   const startTime = Date.now();
-  let currentSession: Session | undefined;
-  let runtime: CachedRuntime | undefined;
-  const runState: ActiveRun = { startedAt: startTime };
+  const abortController = new AbortController();
+  const runState: ActiveRun = {
+    abortController,
+    startedAt: startTime,
+    codexThreadId: options.resumeThreadId,
+  };
+  let timedOut = false;
 
   activeRuns.set(options.conversationId, runState);
 
   try {
-    runtime = getOrCreateRuntime(options, runState, startTime, (session) => {
-      currentSession = session;
-    });
-    const result = streamText({
-      model: runtime.model as Parameters<typeof streamText>[0]["model"],
-      prompt,
-      timeout: options.config.timeoutMs,
-    });
+    const runtime = getOrCreateRuntime(options, startTime);
+    let codexThreadId = runtime.thread.id ?? runtime.threadId ?? options.resumeThreadId;
+    if (codexThreadId) {
+      runState.codexThreadId = codexThreadId;
+    }
 
+    const textCache = new Map<string, string>();
     let output = "";
-    await withTimeout(
-      (async () => {
-        for await (const delta of result.textStream) {
-          output += delta;
-          await emitTextDelta(options.onTextDelta, delta);
-        }
-      })(),
-      options.config.timeoutMs
-    );
+    let usage: Usage | undefined;
 
-    const providerMetadata = await withTimeout(Promise.resolve(result.providerMetadata), 5000).catch(
-      () => undefined
-    );
-    const usage = normalizeCodexUsage(
-      await withTimeout(Promise.resolve(result.totalUsage), 5000).catch(() => undefined)
-    );
-    const codexThreadId =
-      getProviderSessionId(providerMetadata) ?? currentSession?.threadId ?? options.resumeThreadId;
-    if (codexThreadId && runtime) {
-      runtime.currentSession = currentSession;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, options.config.timeoutMs);
+
+    try {
+      const streamed = await runtime.thread.runStreamed(buildPrompt(prompt), {
+        signal: abortController.signal,
+      });
+
+      for await (const event of streamed.events) {
+        if (event.type === "thread.started") {
+          codexThreadId = event.thread_id;
+          runtime.threadId = codexThreadId;
+          runState.codexThreadId = codexThreadId;
+          continue;
+        }
+
+        if (
+          event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed"
+        ) {
+          const delta = getTextDelta(event.item, textCache);
+          if (delta) {
+            output += delta;
+            await emitTextDelta(options.onTextDelta, delta);
+          }
+          continue;
+        }
+
+        if (event.type === "turn.completed") {
+          usage = event.usage;
+          continue;
+        }
+
+        if (event.type === "turn.failed") {
+          throw new Error(event.error.message);
+        }
+
+        if (event.type === "error") {
+          throw new Error(event.message);
+        }
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    codexThreadId = runtime.thread.id ?? runtime.threadId ?? codexThreadId;
+    if (codexThreadId) {
+      runtime.threadId = codexThreadId;
     }
 
     return {
@@ -115,81 +150,71 @@ export async function executeCodex(
       output: output || "(Codex completed without a final response)",
       duration: Date.now() - startTime,
       codexThreadId,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
     };
   } catch (err) {
-    if (isRuntimePoisoningError(err)) {
-      disposeCodexRuntime(options.conversationId);
-    }
     return {
       success: false,
       output: "",
       error: runState.interruptReason
         ? formatCodexInterrupted(runState.interruptReason)
-        : formatCodexError(err, options.config.timeoutMs),
+        : formatCodexError(err, options.config.timeoutMs, timedOut),
       duration: Date.now() - startTime,
-      codexThreadId: currentSession?.threadId ?? options.resumeThreadId,
+      codexThreadId: runState.codexThreadId ?? options.resumeThreadId,
       interrupted: runState.interruptReason !== undefined,
       interruptReason: runState.interruptReason,
     };
   } finally {
-    activeRuns.delete(options.conversationId);
+    if (activeRuns.get(options.conversationId) === runState) {
+      activeRuns.delete(options.conversationId);
+    }
   }
 }
 
-function getOrCreateRuntime(
-  options: ExecuteCodexOptions,
-  activeRun: ActiveRun,
-  startedAt: number,
-  onCurrentSession: (session: Session) => void
-): CachedRuntime {
+function getOrCreateRuntime(options: ExecuteCodexOptions, startedAt: number): CachedRuntime {
   const signature = getRuntimeSignature(options);
   const existing = cachedRuntimes.get(options.conversationId);
   if (existing && existing.signature === signature) {
     existing.startedAt = startedAt;
-    existing.onCurrentSession = onCurrentSession;
     return existing;
   }
 
-  existing?.model.dispose?.();
+  const codexOptions: ConstructorParameters<typeof Codex>[0] = {
+    env: getStringEnv(process.env),
+  };
+  if (options.config.codexBin) {
+    codexOptions.codexPathOverride = options.config.codexBin;
+  }
+
+  const codex = new Codex(codexOptions);
+  const threadOptions = getThreadOptions(options);
+  const thread = options.resumeThreadId
+    ? codex.resumeThread(options.resumeThreadId, threadOptions)
+    : codex.startThread(threadOptions);
 
   const runtime: CachedRuntime = {
-    model: {},
+    codex,
+    thread,
     signature,
     startedAt,
+    threadId: options.resumeThreadId,
   };
 
-  const provider = createCodexAppServer({
-    defaultSettings: {
-      codexPath: options.config.codexBin,
-      cwd: options.workDir,
-      approvalMode: "never",
-      sandboxMode: "workspace-write",
-      threadMode: "persistent",
-      resume: options.resumeThreadId,
-      reasoningEffort: normalizeReasoningEffort(options.config.reasoningEffort),
-      env: getStringEnv(process.env),
-      baseInstructions: BASE_INSTRUCTIONS,
-      configOverrides: {
-        sandbox_workspace_write: {
-          network_access: options.config.networkAccessEnabled,
-        },
-      },
-      onSessionCreated: (session) => {
-        runtime.currentSession = session;
-        runtime.onCurrentSession?.(session);
-        activeRun.session = session;
-        activeRun.startedAt = runtime.startedAt;
-        activeRuns.set(options.conversationId, activeRun);
-      },
-    },
-  });
-
-  runtime.model = provider(options.config.model || "gpt-5.3-codex") as DisposableLanguageModel;
-  runtime.onCurrentSession = onCurrentSession;
   cachedRuntimes.set(options.conversationId, runtime);
   return runtime;
+}
+
+function getThreadOptions(options: ExecuteCodexOptions): ThreadOptions {
+  return {
+    model: options.config.model || "gpt-5.3-codex",
+    workingDirectory: options.workDir,
+    skipGitRepoCheck: options.config.skipGitRepoCheck,
+    approvalPolicy: "never",
+    sandboxMode: "workspace-write",
+    modelReasoningEffort: normalizeReasoningEffort(options.config.reasoningEffort),
+    networkAccessEnabled: options.config.networkAccessEnabled,
+  };
 }
 
 function getRuntimeSignature(options: ExecuteCodexOptions): string {
@@ -198,21 +223,21 @@ function getRuntimeSignature(options: ExecuteCodexOptions): string {
     workDir: options.workDir,
     model: options.config.model || "gpt-5.3-codex",
     reasoningEffort: normalizeReasoningEffort(options.config.reasoningEffort),
+    skipGitRepoCheck: options.config.skipGitRepoCheck,
     networkAccessEnabled: options.config.networkAccessEnabled,
   });
 }
 
 export function disposeCodexRuntime(conversationId?: string): void {
   if (conversationId) {
-    const runtime = cachedRuntimes.get(conversationId);
-    runtime?.model.dispose?.();
+    activeRuns.get(conversationId)?.abortController.abort();
     cachedRuntimes.delete(conversationId);
     activeRuns.delete(conversationId);
     return;
   }
 
-  for (const runtime of cachedRuntimes.values()) {
-    runtime.model.dispose?.();
+  for (const activeRun of activeRuns.values()) {
+    activeRun.abortController.abort();
   }
   cachedRuntimes.clear();
   activeRuns.clear();
@@ -232,7 +257,9 @@ export function interruptCodexRun(
   }
 
   activeRun.interruptReason = reason;
-  disposeCodexRuntime(conversationId);
+  activeRun.abortController.abort();
+  cachedRuntimes.delete(conversationId);
+  activeRuns.delete(conversationId);
   return true;
 }
 
@@ -242,8 +269,7 @@ process.once("exit", () => {
 
 export async function checkCodexSdkAvailable(): Promise<boolean> {
   try {
-    await import("ai-sdk-provider-codex-app-server");
-    await import("ai");
+    await import("@openai/codex-sdk");
     return true;
   } catch {
     return false;
@@ -251,7 +277,7 @@ export async function checkCodexSdkAvailable(): Promise<boolean> {
 }
 
 export function getCodexRuntimeDescription(): string {
-  return "Codex app-server over stdio (provider-managed)";
+  return "Official Codex SDK runStreamed over codex exec";
 }
 
 export function getOpenAIEnvVarNames(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -276,59 +302,46 @@ function getStringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   return result;
 }
 
-function normalizeReasoningEffort(effort: CodexConfig["reasoningEffort"]): ReasoningEffort {
-  if (effort === "minimal") {
-    return "low";
-  }
+function normalizeReasoningEffort(effort: CodexConfig["reasoningEffort"]): ModelReasoningEffort {
   return effort;
 }
 
-function getProviderSessionId(providerMetadata: unknown): string | undefined {
-  if (!providerMetadata || typeof providerMetadata !== "object") {
-    return undefined;
-  }
-
-  const codex = (providerMetadata as { codex?: unknown })["codex"];
-  if (!codex || typeof codex !== "object") {
-    return undefined;
-  }
-
-  const sessionId = (codex as { sessionId?: unknown })["sessionId"];
-  return typeof sessionId === "string" ? sessionId : undefined;
+function buildPrompt(prompt: string): string {
+  return `${BASE_INSTRUCTIONS}\n\nUser request:\n${prompt}`;
 }
 
-function normalizeCodexUsage(usage: unknown): { inputTokens?: number; outputTokens?: number } {
-  if (!usage || typeof usage !== "object") {
-    return {};
+function getTextDelta(item: ThreadItem, textCache: Map<string, string>): string {
+  if (item.type === "agent_message") {
+    return deltaText(textCache, item.id, item.text);
   }
 
-  const inputTokens = getNumericProperty(usage, "inputTokens");
-  const outputTokens = getNumericProperty(usage, "outputTokens");
-  if (isCodexPlaceholderUsage(usage, inputTokens, outputTokens)) {
-    return {};
+  if (item.type === "error") {
+    return deltaText(textCache, item.id, item.message);
   }
 
-  return { inputTokens, outputTokens };
+  return "";
 }
 
-function isCodexPlaceholderUsage(
-  _usage: object,
-  inputTokens: number | undefined,
-  outputTokens: number | undefined
-): boolean {
-  // ai-sdk-provider-codex-app-server currently does not expose token counts and
-  // fills AI SDK usage with 0/0 placeholders.
-  return inputTokens === 0 && outputTokens === 0;
+function deltaText(cache: Map<string, string>, id: string, next: string): string {
+  const previous = cache.get(id) ?? "";
+  cache.set(id, next);
+  if (!previous) {
+    return next;
+  }
+
+  return next.startsWith(previous) ? next.slice(previous.length) : next;
 }
 
-function getNumericProperty(source: object, key: string): number | undefined {
-  const value = (source as Record<string, unknown>)[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
+function formatCodexError(err: unknown, timeoutMs: number, timedOut: boolean): string {
+  if (timedOut) {
+    return `Execution timed out after ${timeoutMs}ms`;
+  }
 
-function formatCodexError(err: unknown, timeoutMs: number): string {
   if (err instanceof Error) {
-    if (err.name === "AbortError" || err.message.toLowerCase().includes("timeout")) {
+    if (err.name === "AbortError" || err.message.toLowerCase().includes("abort")) {
+      return "Execution aborted";
+    }
+    if (err.message.toLowerCase().includes("timeout")) {
       return `Execution timed out after ${timeoutMs}ms`;
     }
     return err.message;
@@ -340,21 +353,6 @@ function formatCodexInterrupted(reason: "stop" | "bang_prefix"): string {
   return reason === "bang_prefix"
     ? "Execution interrupted by a newer ! message"
     : "Execution interrupted by /r stop";
-}
-
-function isRuntimePoisoningError(err: unknown): boolean {
-  if (!(err instanceof Error)) {
-    return false;
-  }
-
-  const message = err.message.toLowerCase();
-  return (
-    err.name === "AbortError" ||
-    message.includes("timeout") ||
-    message.includes("exited") ||
-    message.includes("invalid state") ||
-    message.includes("thread") && message.includes("not found")
-  );
 }
 
 async function emitTextDelta(
@@ -369,21 +367,5 @@ async function emitTextDelta(
     await handler(delta);
   } catch (err) {
     console.error("[Stream] Codex text delta handler failed:", err);
-  }
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`Execution timed out after ${timeoutMs}ms`)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
   }
 }
