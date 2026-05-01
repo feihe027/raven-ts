@@ -63,6 +63,15 @@ npm install
 npm run build
 ```
 
+`npm install` 也会执行 raven-ts 的 postinstall 钩子。它会修补 Codex SDK 的窗口行为，并把内置的 `feishu-docx-bot` skill 安装到：
+
+```text
+~/.claude/skills/feishu-docx-bot
+~/.codex/skills/feishu-docx-bot
+```
+
+这个 skill 会告诉 Claude/Codex 如何通过 raven-ts 飞书机器人创建和更新飞书新版文档。它用于把论文检索结果、研究报告和生成的摘要保存到飞书文档中。
+
 本地运行 CLI：
 
 ```sh

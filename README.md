@@ -66,6 +66,15 @@ npm install
 npm run build
 ```
 
+`npm install` also runs the raven-ts postinstall hook. It patches the Codex SDK window behavior and installs the bundled `feishu-docx-bot` skill into:
+
+```text
+~/.claude/skills/feishu-docx-bot
+~/.codex/skills/feishu-docx-bot
+```
+
+The skill teaches Claude/Codex how to create and update Feishu Docx documents through the raven-ts Feishu bot. It is used for workflows such as saving paper search results, research reports, and generated summaries into Feishu Docs.
+
 Run the CLI locally:
 
 ```sh

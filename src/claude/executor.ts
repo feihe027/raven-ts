@@ -64,6 +64,7 @@ export interface ExecuteOptions {
 const DENIED_BASH_MESSAGE = "Bash command denied by raven-ts allowlist";
 const SYSTEM_PROMPT_APPEND = [
   "raven-ts runs Claude from a Feishu/Lark bot. Some tools may require approval from a Feishu permission card.",
+  "raven-ts installs a feishu-docx-bot skill. When asked to save research, paper lists, reports, or generated content into Feishu Docs, follow that skill and use the existing raven-ts Feishu client helpers.",
   "For network access, prefer built-in WebSearch or WebFetch tools. Do not use Bash network commands such as curl, wget, nc, or ad-hoc Python HTTP clients.",
   "If a tool is denied by raven-ts, continue the turn and explain the denied command instead of waiting for manual approval.",
 ].join("\n");

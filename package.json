@@ -9,13 +9,15 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "scripts",
+    "skills"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
-    "postinstall": "node scripts/patch-codex-sdk.js",
+    "postinstall": "node scripts/patch-codex-sdk.js && node scripts/install-raven-skills.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
