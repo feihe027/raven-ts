@@ -118,10 +118,21 @@ For `raven-ts`, configure the self-built app as follows in the Feishu/Lark devel
    raven-ts start --foreground
    ```
 5. In **Develop configuration > Events and callbacks > Event configuration**, set the subscription method to **Receive events through long connection** and save it while `raven-ts` is running.
-6. Add the **Receive message** event: `im.message.receive_v1`.
+6. Add the message event `im.message.receive_v1`. If you use Claude permission cards, also add the card action event `card.action.trigger`.
 7. Publish a new app version, install or update it in the tenant, and add the bot to the target chat.
 
-Common permission scopes include:
+Add these API permissions as **application permissions**:
+
+| Permission scope | Feishu/Lark console description | Required for |
+| --- | --- | --- |
+| `im:message:send_as_bot` | Send messages as the bot | Text replies, interactive reply cards, Claude permission cards, command responses |
+| `im:message.p2p_msg:readonly` | Read direct messages sent to the bot | Direct chat messages and commands |
+| `im:message.group_at_msg:readonly` | Read group messages that @mention the bot | Group chat usage where users @ the bot |
+| `im:message.group_msg` | Read all messages in groups where the bot is present | Optional group mode if you want the bot to receive non-@ group messages |
+| `im:message:readonly` | Read single-chat and group messages | Some tenants expose this as a broader or legacy alternative to the more specific read scopes |
+| `im:message:update` | Update messages sent by the app | Updating existing interactive cards, including final streaming-card refreshes and permission-card status updates |
+| `cardkit:card:read` | Read CardKit card instances | Converting a reply message id to a CardKit card id for native streaming updates |
+| `cardkit:card:write` | Update CardKit cards and elements | Native streaming updates for the live response card |
 
 ```text
 im:message:send_as_bot
@@ -129,11 +140,21 @@ im:message.p2p_msg:readonly
 im:message.group_at_msg:readonly
 im:message.group_msg
 im:message:readonly
+im:message:update
+cardkit:card:read
+cardkit:card:write
 ```
 
-Exact names may differ by tenant. For direct messages, `im:message.p2p_msg:readonly` is required. For group chats, enable the group message permission prompted by the developer console, commonly `im:message.group_at_msg:readonly` for @-mentions. `im:message:send_as_bot` is required for replies.
+Event subscriptions:
 
-The official card-interactive-bot tutorial also configures bot menus, `application.bot.menu_v6`, `im.chat.access_event.bot_p2p_chat_entered_v1`, and `card.action.trigger`. Those are only needed if you add custom bot menus or interactive card callbacks. Plain `raven-ts` chat control only requires the bot capability, send/receive message permissions, long-connection event subscription, and `im.message.receive_v1`.
+| Event | Required for |
+| --- | --- |
+| `im.message.receive_v1` | Receiving user messages over the long connection |
+| `card.action.trigger` | Handling Allow/Deny clicks on Claude permission cards |
+| `im.chat.access_event.bot_p2p_chat_entered_v1` | Optional; only needed if you add direct-chat entry handling |
+| `im.message.message_read_v1` | Optional; currently registered as a no-op |
+
+Exact names may differ by tenant and Feishu/Lark edition. If the developer console suggests a replacement permission for the same API, use the console suggestion. After changing permissions or events, publish a new app version and update the installed app in the tenant.
 
 ## Start And Logs
 

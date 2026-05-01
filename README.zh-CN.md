@@ -115,10 +115,21 @@ https://open.feishu.cn/document/develop-a-card-interactive-bot/faqs
    raven-ts start --foreground
    ```
 5. 在 **开发配置 > 事件与回调 > 事件配置** 中，将订阅方式设置为 **使用长连接接收事件**，并在 `raven-ts` 正在运行时保存。
-6. 添加 **接收消息** 事件：`im.message.receive_v1`。
+6. 添加消息事件 `im.message.receive_v1`。如果使用 Claude 授权卡片，还需要添加卡片交互事件 `card.action.trigger`。
 7. 创建并发布新的应用版本，在租户中安装或更新应用，然后将机器人添加到目标聊天。
 
-常见权限范围包括：
+在 **API 权限** 中按 **应用身份权限** 添加以下权限：
+
+| 权限范围 | 飞书/Lark 后台描述 | raven-ts 用途 |
+| --- | --- | --- |
+| `im:message:send_as_bot` | 以机器人身份发送消息 | 文本回复、交互式回复卡片、Claude 授权卡片、命令响应 |
+| `im:message.p2p_msg:readonly` | 获取用户发给机器人的单聊消息 | 接收单聊消息和命令 |
+| `im:message.group_at_msg:readonly` | 获取用户在群组中 @ 机器人的消息 | 群聊中通过 @ 机器人使用 |
+| `im:message.group_msg` | 获取机器人所在群组中的所有消息 | 可选；需要接收非 @ 群消息时启用 |
+| `im:message:readonly` | 获取单聊、群组消息 | 部分租户会把它作为更宽泛或历史版本的消息读取权限 |
+| `im:message:update` | 更新应用发送的消息 | 更新已有交互卡片，包括流式回复最终刷新和授权卡片状态更新 |
+| `cardkit:card:read` | 读取 CardKit 卡片实例 | 将回复消息 id 转换为 CardKit card id，用于原生流式更新 |
+| `cardkit:card:write` | 更新 CardKit 卡片和卡片元素 | 对实时回复卡片做原生流式更新 |
 
 ```text
 im:message:send_as_bot
@@ -126,11 +137,21 @@ im:message.p2p_msg:readonly
 im:message.group_at_msg:readonly
 im:message.group_msg
 im:message:readonly
+im:message:update
+cardkit:card:read
+cardkit:card:write
 ```
 
-不同租户中的权限名称可能略有差异。单聊需要 `im:message.p2p_msg:readonly`；群聊通常至少需要开发者后台提示的群消息权限，例如用于 @ 机器人的 `im:message.group_at_msg:readonly`；机器人回复需要 `im:message:send_as_bot`。
+事件订阅：
 
-官方卡片交互机器人教程还会配置机器人菜单、`application.bot.menu_v6`、`im.chat.access_event.bot_p2p_chat_entered_v1` 和 `card.action.trigger`。这些只在你要扩展自定义菜单或交互式卡片回调时需要。普通 `raven-ts` 聊天控制只需要机器人能力、消息收发权限、长连接事件订阅和 `im.message.receive_v1`。
+| 事件 | raven-ts 用途 |
+| --- | --- |
+| `im.message.receive_v1` | 通过长连接接收用户消息 |
+| `card.action.trigger` | 接收 Claude 授权卡片上 Allow/Deny 按钮点击 |
+| `im.chat.access_event.bot_p2p_chat_entered_v1` | 可选；只有扩展单聊进入事件处理时需要 |
+| `im.message.message_read_v1` | 可选；当前代码中注册但不处理 |
+
+不同租户和飞书/Lark 版本中的权限名称可能略有差异。如果开发者后台针对同一个 API 提示了替代权限，以后台提示为准。修改权限或事件后，需要创建并发布新的应用版本，并在租户中更新已安装应用。
 
 ## 启动和日志
 
