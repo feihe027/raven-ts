@@ -14,6 +14,9 @@ Users send messages in Feishu/Lark. `raven-ts` receives them through the bot Web
 - Codex app-server runs over provider-managed stdio.
 - Long-lived Codex runtime cache, so Codex is not restarted after every turn.
 - Mid-run Codex instruction injection through `session.injectMessage(...)`.
+- Claude per-chat queueing, plus `!prompt` interrupt-and-run behavior inspired by `agent-feishu-channel`.
+- `/r stop` to stop the active run and clear queued Claude prompts.
+- Successful replies now include token usage at the bottom of the reply card, with input/output/total counts.
 - Per-chat work directory and agent session binding.
 - Windows background service with PID, logs, status, and hidden console windows.
 - Duplicate Feishu/Lark event protection with message-id dedup and a short content dedup window.
@@ -170,6 +173,7 @@ Send commands in Feishu/Lark:
 /r cd <path>
 /r pwd
 /r clear
+/r stop
 /r status
 /r agent
 /r agent claude
@@ -181,10 +185,12 @@ Send commands in Feishu/Lark:
 
 Command behavior:
 
+- `/r stop` stops the active run. For Claude it also clears queued prompts.
 - `/r cd <path>` changes the work directory and clears the current agent context.
 - `/r clear` clears the current chat's agent session while keeping the work directory.
 - `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new app-server and resumes the saved thread.
 - `/r claude` and `/r codex` switch the backend.
+- `!your message` interrupts the current run and starts a fresh run with the new prompt.
 
 ## Codex
 
@@ -235,6 +241,7 @@ raven-ts config set claude.timeoutMs 300000
 ```
 
 Claude responses store a `claudeSessionId` and later messages resume that SDK session.
+If a second message arrives while Claude is still running, `raven-ts` queues it instead of starting a concurrent Claude turn.
 
 ## Windows Notes
 

@@ -237,12 +237,8 @@ export async function uninstallDaemon(): Promise<{ success: boolean; message: st
     const markerPath = getWindowsMarkerPath();
     const pidPath = getPidPath();
 
-    if (existsSync(markerPath)) {
-      unlinkSync(markerPath);
-    }
-    if (existsSync(pidPath)) {
-      unlinkSync(pidPath);
-    }
+    tryRemoveFile(markerPath);
+    tryRemoveFile(pidPath);
 
     return {
       success: true,
@@ -453,21 +449,39 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
   if (isWindows) {
     const pid = readPidFile();
+    let terminated = false;
+    let failureReason = "";
+
     if (pid && isProcessRunning(pid)) {
-      try {
-        process.kill(pid);
-      } catch {
-        // Ignore errors. Status will report if the process is still running.
-      }
+      const result = await terminateWindowsProcess(pid);
+      terminated = result.stopped;
+      failureReason = result.detail ?? "";
+    } else {
+      terminated = true;
     }
 
-    if (existsSync(getPidPath())) {
-      unlinkSync(getPidPath());
+    const pidPath = getPidPath();
+    const pidFileRemoved = tryRemoveFile(pidPath);
+    const stillRunning = pid !== undefined && isProcessRunning(pid);
+
+    if (stillRunning) {
+      const detail = failureReason ? ` ${failureReason}` : "";
+      return {
+        success: false,
+        message: `Failed to stop daemon (PID ${pid}).${detail}`,
+      };
+    }
+
+    if (!pidFileRemoved && existsSync(pidPath)) {
+      return {
+        success: true,
+        message: `Daemon stopped, but the PID file could not be removed: ${pidPath}`,
+      };
     }
 
     return {
       success: true,
-      message: "Daemon stopped",
+      message: terminated ? "Daemon stopped" : "Daemon already stopped",
     };
   }
 
@@ -552,6 +566,73 @@ function isProcessRunning(pid: number): boolean {
     }
     return false;
   }
+}
+
+async function terminateWindowsProcess(pid: number): Promise<{ stopped: boolean; detail?: string }> {
+  try {
+    process.kill(pid);
+  } catch (err) {
+    if (!isPermissionError(err)) {
+      return {
+        stopped: false,
+        detail: `process.kill failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  await delay(500);
+  if (!isProcessRunning(pid)) {
+    return { stopped: true };
+  }
+
+  try {
+    const { execFileSync } = await import("child_process");
+    execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch (err) {
+    await delay(500);
+    if (!isProcessRunning(pid)) {
+      return { stopped: true };
+    }
+
+    return {
+      stopped: false,
+      detail: `taskkill failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  await delay(500);
+  return isProcessRunning(pid)
+    ? { stopped: false, detail: "process is still running after taskkill" }
+    : { stopped: true };
+}
+
+function tryRemoveFile(path: string): boolean {
+  if (!existsSync(path)) {
+    return true;
+  }
+
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isPermissionError(err: unknown): boolean {
+  return Boolean(
+    err &&
+      typeof err === "object" &&
+      "code" in err &&
+      ((err as { code?: unknown }).code === "EPERM" || (err as { code?: unknown }).code === "EACCES")
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readClaudeEnvFile(): NodeJS.ProcessEnv {

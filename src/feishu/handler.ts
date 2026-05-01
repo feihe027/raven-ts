@@ -27,9 +27,11 @@ import {
   replyWithCard,
   MessageEvent,
 } from "./client.js";
+import { ClaudeStreamingReply } from "./streaming.js";
 import {
   clearSession,
   createSession,
+  getSessionByChatId,
   getOrCreateSession,
   markPromptFinished,
   markPromptStarted,
@@ -37,8 +39,14 @@ import {
   setCodexThreadId,
   clearProviderSessions,
 } from "../session/store.js";
-import { executeClaude, checkClaudeSdkAvailable } from "../claude/executor.js";
-import { disposeCodexRuntime, executeCodex, checkCodexSdkAvailable } from "../codex/executor.js";
+import { executeClaude, checkClaudeSdkAvailable, disposeClaudeRuntime } from "../claude/executor.js";
+import {
+  checkCodexSdkAvailable,
+  disposeCodexRuntime,
+  executeCodex,
+  interruptCodexRun,
+  isCodexRunActive,
+} from "../codex/executor.js";
 import { getDaemonStatus } from "../daemon/service.js";
 import { getRuntimeDir } from "../daemon/paths.js";
 
@@ -142,6 +150,57 @@ interface HandlerContext {
   botOpenId: string;
 }
 
+type InterruptReason = "stop" | "bang_prefix";
+
+interface PendingClaudeRequest {
+  prompt: string;
+  event: MessageEvent;
+  context: HandlerContext;
+}
+
+interface ClaudeChatState {
+  running: boolean;
+  queue: PendingClaudeRequest[];
+  current?: {
+    request: PendingClaudeRequest;
+    abortController: AbortController;
+  };
+  interruptReason?: InterruptReason;
+}
+
+const claudeChatStates = new Map<string, ClaudeChatState>();
+
+function getOrCreateClaudeChatState(chatId: string): ClaudeChatState {
+  const existing = claudeChatStates.get(chatId);
+  if (existing) {
+    return existing;
+  }
+
+  const created: ClaudeChatState = {
+    running: false,
+    queue: [],
+  };
+  claudeChatStates.set(chatId, created);
+  return created;
+}
+
+function isClaudeRunActive(chatId: string): boolean {
+  return claudeChatStates.get(chatId)?.running === true;
+}
+
+function getChatBusyState(chatId: string): { busy: boolean; provider?: "claude" | "codex" } {
+  if (isClaudeRunActive(chatId)) {
+    return { busy: true, provider: "claude" };
+  }
+
+  const session = getSessionByChatId(chatId);
+  if (session && isCodexRunActive(session.id)) {
+    return { busy: true, provider: "codex" };
+  }
+
+  return { busy: false };
+}
+
 /**
  * Handle incoming Feishu message
  */
@@ -185,6 +244,12 @@ export async function handleFeishuMessage(
     return;
   }
 
+  const interruptPrompt = parseInterruptPrompt(trimmedContent);
+  if (interruptPrompt) {
+    await handleAgentRequest(interruptPrompt, messageEvent, context, { interrupt: true });
+    return;
+  }
+
   // Handle commands
   if (trimmedContent.startsWith(COMMAND_PREFIX)) {
     await handleCommand(trimmedContent, messageEvent, context);
@@ -219,16 +284,21 @@ async function handleCommand(
 \`/r agent [claude|codex]\` - Show or switch agent backend
 \`/r claude\` - Switch to Claude
 \`/r codex\` - Switch to Codex
+\`/r stop\` - Stop the current run and clear queued Claude prompts
 \`/r restart\` - Restart Codex runtime for this chat
-\`/r clear\` - Clear agent session
+\`/r clear\` / \`/r reset\` - Clear agent session and restart Claude runtime
 \`/r status\` - Show session status
 
-Just send any message without prefix to execute with the configured agent.`,
+Just send any message without prefix to execute with the configured agent.
+Use \`!your message\` to interrupt the current run and execute a new prompt immediately.`,
         "Help"
       );
       break;
 
     case "cd": {
+      if (!(await ensureChatIdleForMutation(event, context, "change working directory"))) {
+        return;
+      }
       const newPath = args.slice(1).join(" ");
       if (!newPath) {
         await replyToMessage(context.client, event.messageId, "Please specify a path: /r cd <path>");
@@ -246,6 +316,7 @@ Just send any message without prefix to execute with the configured agent.`,
       }
 
       disposeCodexRuntime(session.id);
+      disposeClaudeRuntime(session.id);
       clearSession(session.id);
       createSession(event.chatId, resolvedPath);
       await replyToMessage(
@@ -262,9 +333,14 @@ Just send any message without prefix to execute with the configured agent.`,
       break;
     }
 
-    case "clear": {
+    case "clear":
+    case "reset": {
+      if (!(await ensureChatIdleForMutation(event, context, "clear the current session"))) {
+        return;
+      }
       const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
       disposeCodexRuntime(session.id);
+      disposeClaudeRuntime(session.id);
       clearSession(session.id);
       createSession(event.chatId, session.workDir);
       await replyToMessage(context.client, event.messageId, "Agent session cleared. Next message starts fresh.");
@@ -272,6 +348,9 @@ Just send any message without prefix to execute with the configured agent.`,
     }
 
     case "restart": {
+      if (!(await ensureChatIdleForMutation(event, context, "restart the Codex runtime"))) {
+        return;
+      }
       const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
       disposeCodexRuntime(session.id);
       await replyToMessage(
@@ -284,6 +363,9 @@ Just send any message without prefix to execute with the configured agent.`,
 
     case "claude":
     case "codex": {
+      if (!(await ensureChatIdleForMutation(event, context, "switch agent backend"))) {
+        return;
+      }
       await switchAgent(command, event, context);
       break;
     }
@@ -300,7 +382,15 @@ Just send any message without prefix to execute with the configured agent.`,
         return;
       }
 
+      if (!(await ensureChatIdleForMutation(event, context, "switch agent backend"))) {
+        return;
+      }
       await switchAgent(requestedProvider, event, context);
+      break;
+    }
+
+    case "stop": {
+      await stopActiveRun(event, context);
       break;
     }
 
@@ -366,22 +456,33 @@ async function switchAgent(
 async function handleAgentRequest(
   prompt: string,
   event: MessageEvent,
-  context: HandlerContext
+  context: HandlerContext,
+  options?: { interrupt?: boolean }
 ): Promise<void> {
   const provider = getAgentProvider();
 
   if (provider === "codex") {
+    if (options?.interrupt) {
+      await interruptCodexAndRun(prompt, event, context);
+      return;
+    }
     await handleCodexRequest(prompt, event, context);
     return;
   }
 
-  await handleClaudeRequest(prompt, event, context);
+  if (options?.interrupt) {
+    await interruptClaudeAndRun(prompt, event, context);
+    return;
+  }
+
+  await enqueueClaudeRequest(prompt, event, context);
 }
 
-async function handleClaudeRequest(
+async function executeClaudeRequest(
   prompt: string,
   event: MessageEvent,
-  context: HandlerContext
+  context: HandlerContext,
+  interruptSignal?: AbortSignal
 ): Promise<void> {
   const config = getClaudeConfig();
   const session = getOrCreateSession(event.chatId, config.defaultWorkDir);
@@ -392,11 +493,17 @@ async function handleClaudeRequest(
     `[Execute] Running Claude Agent SDK in ${session.workDir} (resume: ${session.claudeSessionId ?? "new"})...`
   );
 
+  const streamReply = new ClaudeStreamingReply(context.client, event.messageId);
+  await streamReply.start();
+
   const result = await executeClaude(prompt, {
+    conversationId: session.id,
     workDir: session.workDir,
     resumeSessionId: session.claudeSessionId,
     timeout: config.timeoutMs,
     maxTurns: config.maxTurns,
+    interruptSignal,
+    onStreamEvent: (streamEvent) => streamReply.handleEvent(streamEvent),
   });
 
   if (result.claudeSessionId) {
@@ -404,42 +511,34 @@ async function handleClaudeRequest(
   }
   markPromptFinished(session);
 
+  if (result.interrupted) {
+    await streamReply.finish("Claude run interrupted.", "Claude interrupted");
+    return;
+  }
+
   if (result.success) {
-    const responseText = truncateForFeishu(result.output);
-
-    console.log(`[Execute] Completed in ${result.duration}ms, sending reply...`);
-    if (isDebugEventsEnabled()) {
-      console.log(`[Debug] Response length: ${responseText.length} chars`);
-    }
-
-    try {
-      await replyWithCard(
-        context.client,
-        event.messageId,
-        responseText,
-        `[OK] Completed (${formatDuration(result.duration)})`
-      );
-      console.log(`[Reply] Sent successfully`);
-    } catch (replyError) {
-      console.error(`[Reply] Failed to send:`, replyError);
+    const responseText = formatSuccessReplyContent(result.output, result.inputTokens, result.outputTokens);
+    const streamed = await streamReply.finish(
+      responseText,
+      `[OK] Claude completed (${formatDuration(result.duration)})`
+    );
+    if (streamed) {
+      console.log(`[Reply] Streamed reply finalized successfully`);
+      return;
     }
   } else {
     const errorText = result.error || result.output || "Unknown error";
-
-    console.error(`[Execute] Failed: ${errorText}`);
-
-    try {
-      await replyWithCard(
-        context.client,
-        event.messageId,
-        `[ERROR] **Error**\n\n\`\`\`\n${truncateForFeishu(errorText, 3000)}\n\`\`\``,
-        "Execution Failed"
-      );
-      console.log(`[Reply] Error message sent successfully`);
-    } catch (replyError) {
-      console.error(`[Reply] Failed to send error message:`, replyError);
+    const streamed = await streamReply.finish(
+      `[ERROR] **Claude error**\n\n\`\`\`\n${truncateForFeishu(errorText, 3000)}\n\`\`\``,
+      "Execution Failed"
+    );
+    if (streamed) {
+      console.log(`[Reply] Streamed error finalized successfully`);
+      return;
     }
   }
+
+  await replyExecutionResult("Claude", result, event, context);
 }
 
 async function handleCodexRequest(
@@ -479,17 +578,199 @@ async function handleCodexRequest(
     return;
   }
 
+  if (result.interrupted) {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      formatInterruptedReply("Codex", result.interruptReason ?? "stop")
+    );
+    return;
+  }
+
   await replyExecutionResult("Codex", result, event, context);
+}
+
+async function enqueueClaudeRequest(
+  prompt: string,
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const state = getOrCreateClaudeChatState(event.chatId);
+  const request: PendingClaudeRequest = { prompt, event, context };
+
+  if (state.running) {
+    state.queue.push(request);
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      `Claude is busy. Queued at position ${state.queue.length}.`
+    );
+    return;
+  }
+
+  state.running = true;
+  void processClaudeQueue(event.chatId, state, request);
+}
+
+async function processClaudeQueue(
+  chatId: string,
+  state: ClaudeChatState,
+  initialRequest: PendingClaudeRequest
+): Promise<void> {
+  let nextRequest: PendingClaudeRequest | undefined = initialRequest;
+
+  while (nextRequest) {
+    const abortController = new AbortController();
+    state.current = {
+      request: nextRequest,
+      abortController,
+    };
+
+    try {
+      await executeClaudeRequest(
+        nextRequest.prompt,
+        nextRequest.event,
+        nextRequest.context,
+        abortController.signal
+      );
+    } catch (err) {
+      console.error(`[Execute] Claude queue processing failed:`, err);
+      try {
+        await replyToMessage(
+          nextRequest.context.client,
+          nextRequest.event.messageId,
+          `Claude execution failed before sending a reply: ${err instanceof Error ? err.message : String(err)}`
+        );
+      } catch {
+        // Ignore secondary reply failures.
+      }
+    }
+
+    const interruptReason = state.interruptReason;
+    state.current = undefined;
+    state.interruptReason = undefined;
+
+    if (abortController.signal.aborted) {
+      await replyInterruptedRequest(nextRequest, "Claude", interruptReason ?? "stop");
+    }
+
+    nextRequest = state.queue.shift();
+  }
+
+  state.running = false;
+  state.current = undefined;
+  state.interruptReason = undefined;
+
+  if (state.queue.length === 0) {
+    claudeChatStates.delete(chatId);
+  }
+}
+
+async function interruptClaudeAndRun(
+  prompt: string,
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const state = claudeChatStates.get(event.chatId);
+  if (!state?.running) {
+    await enqueueClaudeRequest(prompt, event, context);
+    return;
+  }
+
+  const replacement: PendingClaudeRequest = { prompt, event, context };
+  const dropped = state.queue.splice(0, state.queue.length);
+  state.queue.push(replacement);
+  state.interruptReason = "bang_prefix";
+
+  await notifyDroppedQueuedRequests(dropped, "Claude", "bang_prefix");
+
+  state.current?.abortController.abort();
+
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    "Interrupting the current Claude run. Your message will run next."
+  );
+}
+
+async function interruptCodexAndRun(
+  prompt: string,
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
+  const interrupted = interruptCodexRun(session.id, "bang_prefix");
+
+  if (interrupted) {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      "Interrupting the current Codex run. Your message will start a fresh run."
+    );
+  }
+
+  await handleCodexRequest(prompt, event, context);
+}
+
+async function stopActiveRun(event: MessageEvent, context: HandlerContext): Promise<void> {
+  const busyState = getChatBusyState(event.chatId);
+  if (!busyState.busy) {
+    await replyToMessage(context.client, event.messageId, "No active agent run to stop.");
+    return;
+  }
+
+  if (busyState.provider === "claude") {
+    const state = claudeChatStates.get(event.chatId);
+    if (!state?.running) {
+      await replyToMessage(context.client, event.messageId, "No active Claude run to stop.");
+      return;
+    }
+
+    const dropped = state.queue.splice(0, state.queue.length);
+    state.interruptReason = "stop";
+
+    await notifyDroppedQueuedRequests(dropped, "Claude", "stop");
+    state.current?.abortController.abort();
+
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      dropped.length > 0
+        ? `Stopping the current Claude run and clearing ${dropped.length} queued prompt(s).`
+        : "Stopping the current Claude run."
+    );
+    return;
+  }
+
+  const session = getSessionByChatId(event.chatId);
+  if (!session || !interruptCodexRun(session.id, "stop")) {
+    await replyToMessage(context.client, event.messageId, "No active Codex run to stop.");
+    return;
+  }
+
+  await replyToMessage(context.client, event.messageId, "Stopping the current Codex run.");
 }
 
 async function replyExecutionResult(
   agentName: string,
-  result: { success: boolean; output: string; error?: string; duration: number },
+  result: {
+    success: boolean;
+    output: string;
+    error?: string;
+    duration: number;
+    interrupted?: boolean;
+    inputTokens?: number;
+    outputTokens?: number;
+  },
   event: MessageEvent,
   context: HandlerContext
 ): Promise<void> {
+  if (result.interrupted) {
+    return;
+  }
+
   if (result.success) {
-    const responseText = truncateForFeishu(result.output);
+    const responseText = formatSuccessReplyContent(result.output, result.inputTokens, result.outputTokens);
 
     console.log(`[Execute] ${agentName} completed in ${result.duration}ms, sending reply...`);
     if (isDebugEventsEnabled()) {
@@ -524,6 +805,109 @@ async function replyExecutionResult(
       console.error(`[Reply] Failed to send error message:`, replyError);
     }
   }
+}
+
+async function ensureChatIdleForMutation(
+  event: MessageEvent,
+  context: HandlerContext,
+  actionDescription: string
+): Promise<boolean> {
+  const busyState = getChatBusyState(event.chatId);
+  if (!busyState.busy) {
+    return true;
+  }
+
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    `Cannot ${actionDescription} while ${busyState.provider} is running. Use /r stop first or wait for the current run to finish.`
+  );
+  return false;
+}
+
+function parseInterruptPrompt(content: string): string | null {
+  if (!content.startsWith("!")) {
+    return null;
+  }
+
+  let payload = content.slice(1);
+  if (payload.startsWith(" ")) {
+    payload = payload.slice(1);
+  }
+
+  return payload.trim() ? payload : null;
+}
+
+async function notifyDroppedQueuedRequests(
+  requests: PendingClaudeRequest[],
+  agentName: string,
+  reason: InterruptReason
+): Promise<void> {
+  for (const request of requests) {
+    try {
+      await replyToMessage(
+        request.context.client,
+        request.event.messageId,
+        `${agentName} did not start this queued prompt because it was cleared by ${
+          reason === "bang_prefix" ? "a newer ! message" : "/r stop"
+        }.`
+      );
+    } catch (err) {
+      console.error(`[Reply] Failed to notify dropped queued prompt:`, err);
+    }
+  }
+}
+
+async function replyInterruptedRequest(
+  request: PendingClaudeRequest,
+  agentName: string,
+  reason: InterruptReason
+): Promise<void> {
+  try {
+    await replyToMessage(
+      request.context.client,
+      request.event.messageId,
+      formatInterruptedReply(agentName, reason)
+    );
+  } catch (err) {
+    console.error(`[Reply] Failed to send interrupted reply:`, err);
+  }
+}
+
+function formatInterruptedReply(agentName: string, reason: InterruptReason): string {
+  return reason === "bang_prefix"
+    ? `${agentName} run interrupted by a newer ! message.`
+    : `${agentName} run stopped by /r stop.`;
+}
+
+function formatSuccessReplyContent(
+  text: string,
+  inputTokens?: number,
+  outputTokens?: number
+): string {
+  const footer = formatTokenUsageFooter(inputTokens, outputTokens);
+  const reserved = footer.length + 2;
+  const body = truncateForFeishu(text, Math.max(2000, 28000 - reserved));
+  return `${body}\n\n${footer}`;
+}
+
+function formatTokenUsageFooter(inputTokens?: number, outputTokens?: number): string {
+  const input = inputTokens ?? 0;
+  const output = outputTokens ?? 0;
+  const total = input + output;
+  return [
+    "---",
+    `**Token usage**  `,
+    `input: \`${formatTokenCount(input)}\` | output: \`${formatTokenCount(output)}\` | total: \`${formatTokenCount(total)}\``,
+  ].join("\n");
+}
+
+function formatTokenCount(value: number): string {
+  if (value < 1000) {
+    return String(value);
+  }
+
+  return `${(value / 1000).toFixed(1)}k`;
 }
 
 /**

@@ -3,8 +3,10 @@ import { createRequire } from "module";
 import type {
   CanUseTool,
   PermissionResult,
+  Query,
   SDKMessage,
   SDKResultMessage,
+  SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 
 const require = createRequire(import.meta.url);
@@ -15,13 +17,25 @@ export interface ExecuteResult {
   error?: string;
   duration: number;
   claudeSessionId?: string;
+  interrupted?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
+export type ClaudeStreamEvent =
+  | { type: "assistant_text"; text: string }
+  | { type: "thinking"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; toolUseId: string; isError: boolean; text: string };
+
 export interface ExecuteOptions {
+  conversationId?: string;
   workDir: string;
   resumeSessionId?: string;
   timeout: number;
   maxTurns: number;
+  interruptSignal?: AbortSignal;
+  onStreamEvent?: (event: ClaudeStreamEvent) => Promise<void> | void;
 }
 
 const DENIED_BASH_MESSAGE = "Bash command denied by raven-ts allowlist";
@@ -32,6 +46,18 @@ const SYSTEM_PROMPT_APPEND = [
 ].join("\n");
 let cachedClaudeCodeExecutablePath: string | undefined | null;
 
+interface ClaudeRuntime {
+  key: string;
+  workDir: string;
+  input: ClaudeInputQueue;
+  query: Query;
+  iterator: AsyncIterator<SDKMessage>;
+  deniedCommands?: string[];
+  claudeSessionId?: string;
+}
+
+const claudeRuntimes = new Map<string, ClaudeRuntime>();
+
 /**
  * Execute a prompt through the Claude Agent SDK.
  */
@@ -40,56 +66,91 @@ export async function executeClaude(
   options: ExecuteOptions
 ): Promise<ExecuteResult> {
   const startTime = Date.now();
-  const abortController = new AbortController();
+  const runtimeKey = getClaudeRuntimeKey(options);
   const deniedCommands: string[] = [];
   const assistantText: string[] = [];
   let resultMessage: SDKResultMessage | undefined;
   let claudeSessionId = options.resumeSessionId;
   let timedOut = false;
+  let interrupted = false;
+  let runtime: ClaudeRuntime | undefined;
+  let forceCloseTimeoutId: NodeJS.Timeout | undefined;
+
+  const interruptRuntime = (): void => {
+    if (!runtime) {
+      return;
+    }
+
+    const interruptedRuntime = runtime;
+    void interruptedRuntime.query.interrupt().catch((err) => {
+      console.error("[Claude] Failed to interrupt persistent runtime; disposing it:", err);
+      disposeClaudeRuntime(interruptedRuntime.key);
+    });
+  };
+
+  const onInterrupt = (): void => {
+    if (timedOut) {
+      return;
+    }
+    interrupted = true;
+    interruptRuntime();
+  };
+
+  if (options.interruptSignal?.aborted) {
+    onInterrupt();
+  } else {
+    options.interruptSignal?.addEventListener("abort", onInterrupt, { once: true });
+  }
 
   const timeoutId = setTimeout(() => {
     timedOut = true;
-    abortController.abort();
+    interruptRuntime();
+    forceCloseTimeoutId = setTimeout(() => {
+      disposeClaudeRuntime(runtimeKey);
+    }, 10000);
   }, options.timeout);
 
   try {
-    const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    const pathToClaudeCodeExecutable = resolveClaudeCodeExecutablePath();
-    const stream = query({
-      prompt,
-      options: {
-        cwd: options.workDir,
-        resume: options.resumeSessionId,
-        permissionMode: "acceptEdits",
-        tools: { type: "preset", preset: "claude_code" },
-        allowedTools: ["WebSearch", "WebFetch"],
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          append: SYSTEM_PROMPT_APPEND,
-        },
-        env: process.env,
-        maxTurns: options.maxTurns,
-        pathToClaudeCodeExecutable,
-        abortController,
-        canUseTool: createCanUseTool(deniedCommands),
-      },
-    });
+    runtime = await getOrCreateClaudeRuntime(runtimeKey, options);
+    claudeSessionId = runtime.claudeSessionId ?? claudeSessionId;
+    runtime.deniedCommands = deniedCommands;
+    runtime.input.enqueue(createUserMessage(prompt));
 
-    for await (const message of stream) {
+    while (true) {
+      const next = await runtime.iterator.next();
+      if (next.done) {
+        disposeClaudeRuntime(runtimeKey);
+        break;
+      }
+
+      const message = next.value;
       claudeSessionId = getMessageSessionId(message) ?? claudeSessionId;
+      runtime.claudeSessionId = claudeSessionId;
 
       if (message.type === "assistant") {
-        assistantText.push(...extractAssistantText(message.message.content));
+        for (const event of extractAssistantStreamEvents(message.message.content)) {
+          if (event.type === "assistant_text") {
+            assistantText.push(event.text);
+          }
+          await emitStreamEvent(options.onStreamEvent, event);
+        }
+      }
+
+      if (message.type === "user") {
+        for (const event of extractUserStreamEvents(message.message.content)) {
+          await emitStreamEvent(options.onStreamEvent, event);
+        }
       }
 
       if (message.type === "result") {
         resultMessage = message;
+        break;
       }
     }
 
     const duration = resultMessage?.duration_ms ?? Date.now() - startTime;
     const fallbackOutput = assistantText.join("\n\n").trim();
+    const usage = getResultUsage(resultMessage);
 
     if (deniedCommands.length > 0) {
       const error = deniedCommands.join("\n");
@@ -99,6 +160,8 @@ export async function executeClaude(
         error,
         duration,
         claudeSessionId,
+        inputTokens: usage?.input_tokens,
+        outputTokens: usage?.output_tokens,
       };
     }
 
@@ -106,11 +169,16 @@ export async function executeClaude(
       return {
         success: false,
         output: fallbackOutput,
+        interrupted,
         error: timedOut
           ? `Execution timed out after ${options.timeout}ms`
+          : interrupted
+            ? "Execution interrupted by raven-ts"
           : "Claude SDK finished without a result message",
         duration: Date.now() - startTime,
         claudeSessionId,
+        inputTokens: usage?.input_tokens,
+        outputTokens: usage?.output_tokens,
       };
     }
 
@@ -122,6 +190,8 @@ export async function executeClaude(
         output: resultMessage.result || fallbackOutput,
         duration,
         claudeSessionId,
+        inputTokens: usage?.input_tokens,
+        outputTokens: usage?.output_tokens,
       };
     }
 
@@ -129,22 +199,54 @@ export async function executeClaude(
     return {
       success: false,
       output: fallbackOutput,
+      interrupted,
       error: errorText,
       duration,
       claudeSessionId,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
     };
   } catch (err) {
+    if (!interrupted && !timedOut) {
+      disposeClaudeRuntime(runtimeKey);
+    }
     const deniedError = deniedCommands.join("\n");
     return {
       success: false,
       output: assistantText.join("\n\n").trim(),
+      interrupted,
       error: deniedError || formatThrownSdkError(err, timedOut, options.timeout),
       duration: Date.now() - startTime,
       claudeSessionId,
+      inputTokens: getResultUsage(resultMessage)?.input_tokens,
+      outputTokens: getResultUsage(resultMessage)?.output_tokens,
     };
   } finally {
     clearTimeout(timeoutId);
+    if (forceCloseTimeoutId) {
+      clearTimeout(forceCloseTimeoutId);
+    }
+    if (runtime?.deniedCommands === deniedCommands) {
+      runtime.deniedCommands = undefined;
+    }
+    options.interruptSignal?.removeEventListener("abort", onInterrupt);
   }
+}
+
+export function disposeClaudeRuntime(conversationId?: string): void {
+  if (conversationId) {
+    const runtime = claudeRuntimes.get(conversationId);
+    runtime?.input.close();
+    runtime?.query.close();
+    claudeRuntimes.delete(conversationId);
+    return;
+  }
+
+  for (const runtime of claudeRuntimes.values()) {
+    runtime.input.close();
+    runtime.query.close();
+  }
+  claudeRuntimes.clear();
 }
 
 export async function checkClaudeSdkAvailable(): Promise<boolean> {
@@ -239,11 +341,12 @@ function canRunClaudeCode(path: string): boolean {
     encoding: "utf-8",
     stdio: "ignore",
     timeout: 5000,
+    windowsHide: true,
   });
   return !result.error && result.status === 0;
 }
 
-function createCanUseTool(deniedCommands: string[]): CanUseTool {
+function createCanUseTool(runtime: ClaudeRuntime): CanUseTool {
   return async (toolName, input, permissionOptions): Promise<PermissionResult> => {
     if (toolName !== "Bash") {
       return {
@@ -267,7 +370,7 @@ function createCanUseTool(deniedCommands: string[]): CanUseTool {
     const message = command
       ? `${DENIED_BASH_MESSAGE}: ${command}`
       : `${DENIED_BASH_MESSAGE}: missing command`;
-    deniedCommands.push(message);
+    runtime.deniedCommands?.push(message);
 
     return {
       behavior: "deny",
@@ -277,6 +380,123 @@ function createCanUseTool(deniedCommands: string[]): CanUseTool {
     };
   };
 }
+
+async function getOrCreateClaudeRuntime(
+  key: string,
+  options: ExecuteOptions
+): Promise<ClaudeRuntime> {
+  const existing = claudeRuntimes.get(key);
+  if (existing && existing.workDir === options.workDir) {
+    return existing;
+  }
+
+  if (existing) {
+    disposeClaudeRuntime(key);
+  }
+
+  const { query } = await import("@anthropic-ai/claude-agent-sdk");
+  const input = new ClaudeInputQueue();
+  const runtime = {
+    key,
+    workDir: options.workDir,
+    input,
+  } as ClaudeRuntime;
+
+  const stream = query({
+    prompt: input,
+    options: {
+      cwd: options.workDir,
+      resume: options.resumeSessionId,
+      permissionMode: "acceptEdits",
+      tools: { type: "preset", preset: "claude_code" },
+      allowedTools: ["WebSearch", "WebFetch"],
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: SYSTEM_PROMPT_APPEND,
+      },
+      env: process.env,
+      maxTurns: options.maxTurns,
+      pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
+      canUseTool: createCanUseTool(runtime),
+    },
+  });
+
+  runtime.query = stream;
+  runtime.iterator = stream[Symbol.asyncIterator]();
+  claudeRuntimes.set(key, runtime);
+  return runtime;
+}
+
+function getClaudeRuntimeKey(options: ExecuteOptions): string {
+  return options.conversationId ?? `${options.workDir}:${options.resumeSessionId ?? "new"}`;
+}
+
+function createUserMessage(prompt: string): SDKUserMessage {
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: prompt }],
+    },
+    parent_tool_use_id: null,
+  };
+}
+
+class ClaudeInputQueue implements AsyncIterable<SDKUserMessage> {
+  private messages: SDKUserMessage[] = [];
+  private waiting: ((result: IteratorResult<SDKUserMessage>) => void) | undefined;
+  private closed = false;
+
+  enqueue(message: SDKUserMessage): void {
+    if (this.closed) {
+      throw new Error("Claude runtime input queue is closed");
+    }
+
+    if (this.waiting) {
+      const resolve = this.waiting;
+      this.waiting = undefined;
+      resolve({ done: false, value: message });
+      return;
+    }
+
+    this.messages.push(message);
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.waiting) {
+      const resolve = this.waiting;
+      this.waiting = undefined;
+      resolve({ done: true, value: undefined });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+    return {
+      next: () => this.next(),
+    };
+  }
+
+  private next(): Promise<IteratorResult<SDKUserMessage>> {
+    const message = this.messages.shift();
+    if (message) {
+      return Promise.resolve({ done: false, value: message });
+    }
+
+    if (this.closed) {
+      return Promise.resolve({ done: true, value: undefined });
+    }
+
+    return new Promise((resolve) => {
+      this.waiting = resolve;
+    });
+  }
+}
+
+process.once("exit", () => {
+  disposeClaudeRuntime();
+});
 
 function getBashCommand(input: Record<string, unknown>): string {
   const command = input.command;
@@ -312,28 +532,119 @@ function hasShellControlSyntax(command: string): boolean {
   return /[;&|`<>]|\$\(|\n|\r/.test(command);
 }
 
-function extractAssistantText(content: unknown): string[] {
+function extractAssistantStreamEvents(content: unknown): ClaudeStreamEvent[] {
   if (typeof content === "string") {
-    return [content];
+    return content ? [{ type: "assistant_text", text: content }] : [];
   }
 
   if (!Array.isArray(content)) {
     return [];
   }
 
-  const textBlocks: string[] = [];
+  const events: ClaudeStreamEvent[] = [];
   for (const block of content) {
     if (!block || typeof block !== "object") {
       continue;
     }
 
     const record = block as Record<string, unknown>;
-    if (typeof record.text === "string") {
-      textBlocks.push(record.text);
+    const blockType = record.type;
+    if (blockType === "text" && typeof record.text === "string" && record.text) {
+      events.push({ type: "assistant_text", text: record.text });
+      continue;
+    }
+
+    if (blockType === "thinking" && typeof record.thinking === "string" && record.thinking) {
+      events.push({ type: "thinking", text: record.thinking });
+      continue;
+    }
+
+    if (
+      blockType === "tool_use" &&
+      typeof record.id === "string" &&
+      typeof record.name === "string"
+    ) {
+      events.push({
+        type: "tool_use",
+        id: record.id,
+        name: record.name,
+        input: record.input,
+      });
     }
   }
 
-  return textBlocks;
+  return events;
+}
+
+function extractUserStreamEvents(content: unknown): ClaudeStreamEvent[] {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  const events: ClaudeStreamEvent[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") {
+      continue;
+    }
+
+    const record = block as Record<string, unknown>;
+    if (record.type !== "tool_result") {
+      continue;
+    }
+
+    events.push({
+      type: "tool_result",
+      toolUseId: typeof record.tool_use_id === "string" ? record.tool_use_id : "",
+      isError: record.is_error === true,
+      text: extractToolResultText(record.content),
+    });
+  }
+
+  return events;
+}
+
+function extractToolResultText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const parts: string[] = [];
+  for (const item of content) {
+    if (typeof item === "string") {
+      parts.push(item);
+      continue;
+    }
+
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+
+    const record = item as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      parts.push(record.text);
+    }
+  }
+
+  return parts.join("\n");
+}
+
+async function emitStreamEvent(
+  handler: ExecuteOptions["onStreamEvent"],
+  event: ClaudeStreamEvent
+): Promise<void> {
+  if (!handler) {
+    return;
+  }
+
+  try {
+    await handler(event);
+  } catch (err) {
+    console.error("[Stream] Claude stream event handler failed:", err);
+  }
 }
 
 function formatSdkError(message: SDKResultMessage, fallbackOutput: string): string {
@@ -381,4 +692,14 @@ function getMessageSessionId(message: SDKMessage): string | undefined {
     return message.session_id;
   }
   return undefined;
+}
+
+function getResultUsage(
+  message: SDKResultMessage | undefined
+): { input_tokens?: number; output_tokens?: number } | undefined {
+  if (!message || !("usage" in message) || !message.usage || typeof message.usage !== "object") {
+    return undefined;
+  }
+
+  return message.usage as { input_tokens?: number; output_tokens?: number };
 }

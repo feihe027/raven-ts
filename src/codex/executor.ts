@@ -13,6 +13,10 @@ export interface ExecuteCodexResult {
   duration: number;
   codexThreadId?: string;
   injected?: boolean;
+  interrupted?: boolean;
+  interruptReason?: "stop" | "bang_prefix";
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export interface ExecuteCodexOptions {
@@ -25,6 +29,7 @@ export interface ExecuteCodexOptions {
 interface ActiveRun {
   session?: Session;
   startedAt: number;
+  interruptReason?: "stop" | "bang_prefix";
 }
 
 interface CachedRuntime {
@@ -67,11 +72,12 @@ export async function executeCodex(
   const startTime = Date.now();
   let currentSession: Session | undefined;
   let runtime: CachedRuntime | undefined;
+  const runState: ActiveRun = { startedAt: startTime };
 
-  activeRuns.set(options.conversationId, { startedAt: startTime });
+  activeRuns.set(options.conversationId, runState);
 
   try {
-    runtime = getOrCreateRuntime(options, startTime, (session) => {
+    runtime = getOrCreateRuntime(options, runState, startTime, (session) => {
       currentSession = session;
     });
     const result = streamText({
@@ -93,6 +99,7 @@ export async function executeCodex(
     const providerMetadata = await withTimeout(Promise.resolve(result.providerMetadata), 5000).catch(
       () => undefined
     );
+    const usage = await withTimeout(Promise.resolve(result.totalUsage), 5000).catch(() => undefined);
     const codexThreadId =
       getProviderSessionId(providerMetadata) ?? currentSession?.threadId ?? options.resumeThreadId;
     if (codexThreadId && runtime) {
@@ -104,6 +111,8 @@ export async function executeCodex(
       output: output || "(Codex completed without a final response)",
       duration: Date.now() - startTime,
       codexThreadId,
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
     };
   } catch (err) {
     if (isRuntimePoisoningError(err)) {
@@ -112,9 +121,13 @@ export async function executeCodex(
     return {
       success: false,
       output: "",
-      error: formatCodexError(err, options.config.timeoutMs),
+      error: runState.interruptReason
+        ? formatCodexInterrupted(runState.interruptReason)
+        : formatCodexError(err, options.config.timeoutMs),
       duration: Date.now() - startTime,
       codexThreadId: currentSession?.threadId ?? options.resumeThreadId,
+      interrupted: runState.interruptReason !== undefined,
+      interruptReason: runState.interruptReason,
     };
   } finally {
     activeRuns.delete(options.conversationId);
@@ -123,6 +136,7 @@ export async function executeCodex(
 
 function getOrCreateRuntime(
   options: ExecuteCodexOptions,
+  activeRun: ActiveRun,
   startedAt: number,
   onCurrentSession: (session: Session) => void
 ): CachedRuntime {
@@ -161,10 +175,9 @@ function getOrCreateRuntime(
       onSessionCreated: (session) => {
         runtime.currentSession = session;
         runtime.onCurrentSession?.(session);
-        activeRuns.set(options.conversationId, {
-          session,
-          startedAt: runtime.startedAt,
-        });
+        activeRun.session = session;
+        activeRun.startedAt = runtime.startedAt;
+        activeRuns.set(options.conversationId, activeRun);
       },
     },
   });
@@ -199,6 +212,24 @@ export function disposeCodexRuntime(conversationId?: string): void {
   }
   cachedRuntimes.clear();
   activeRuns.clear();
+}
+
+export function isCodexRunActive(conversationId: string): boolean {
+  return activeRuns.has(conversationId);
+}
+
+export function interruptCodexRun(
+  conversationId: string,
+  reason: "stop" | "bang_prefix" = "stop"
+): boolean {
+  const activeRun = activeRuns.get(conversationId);
+  if (!activeRun) {
+    return false;
+  }
+
+  activeRun.interruptReason = reason;
+  disposeCodexRuntime(conversationId);
+  return true;
 }
 
 process.once("exit", () => {
@@ -270,6 +301,12 @@ function formatCodexError(err: unknown, timeoutMs: number): string {
     return err.message;
   }
   return String(err);
+}
+
+function formatCodexInterrupted(reason: "stop" | "bang_prefix"): string {
+  return reason === "bang_prefix"
+    ? "Execution interrupted by a newer ! message"
+    : "Execution interrupted by /r stop";
 }
 
 function isRuntimePoisoningError(err: unknown): boolean {
