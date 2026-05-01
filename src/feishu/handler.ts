@@ -16,7 +16,9 @@ import {
   getFeishuConfig,
   getClaudeConfig,
   setAgentProvider,
+  setClaudeConfig,
   setCodexConfig,
+  type ClaudeAuthMode,
   type CodexSandboxMode,
 } from "../config.js";
 import {
@@ -299,6 +301,7 @@ async function handleCommand(
 \`/r claude\` - Switch to Claude
 \`/r codex\` - Switch to Codex
 \`/r stop\` - Stop the current run and clear queued Claude prompts
+\`/r auth [status|safe|ask|auto|accept-edits|deny|bypass]\` - Show or set Claude authorization mode
 \`/r sandbox [status|on|off|read-only|workspace-write|danger-full-access]\` - Show or set Codex sandbox mode
 \`/r restart\` - Restart Codex runtime for this chat
 \`/r clear\` / \`/r reset\` - Clear agent session and restart Claude runtime
@@ -381,6 +384,11 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
       break;
     }
 
+    case "auth": {
+      await handleClaudeAuthCommand(args, event, context);
+      break;
+    }
+
     case "claude":
     case "codex": {
       if (!(await ensureChatIdleForMutation(event, context, "switch agent backend"))) {
@@ -422,6 +430,7 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
 
     case "status": {
       const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
+      const claudeConfig = getClaudeConfig();
       const codexConfig = getCodexConfig();
       const claudeAvailable = await checkClaudeSdkAvailable();
       const codexAvailable = await checkCodexSdkAvailable();
@@ -433,6 +442,7 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
 **Agent:** ${getAgentProvider()}
 **Claude SDK:** ${claudeAvailable ? "Available" : "Not found"}
 **Claude SDK Session:** \`${session.claudeSessionId ?? "none"}\`
+**Claude Auth:** \`${claudeConfig.authMode ?? "safe"}\`
 **Codex SDK:** ${codexAvailable ? "Available" : "Not found"}
 **Codex Thread:** \`${session.codexThreadId ?? "none"}\`
 **Codex Sandbox:** \`${codexConfig.sandboxMode ?? "workspace-write"}\`
@@ -452,6 +462,83 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
         `Unknown command: ${command}\nType /r help for available commands.`
       );
   }
+}
+
+async function handleClaudeAuthCommand(
+  args: string[],
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const requested = args[1]?.toLowerCase();
+  const current = getClaudeConfig().authMode ?? "safe";
+
+  if (!requested || requested === "status") {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      [
+        `Claude auth mode: ${current}`,
+        "Use /r auth safe for the raven-ts allowlist, /r auth ask for Feishu buttons, /r auth auto for Claude auto decisions, or /r auth bypass to skip permission checks.",
+      ].join("\n")
+    );
+    return;
+  }
+
+  const next = parseClaudeAuthMode(requested);
+  if (!next) {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      "Usage: /r auth [status|safe|ask|auto|accept-edits|deny|bypass]"
+    );
+    return;
+  }
+
+  if (!(await ensureChatIdleForMutation(event, context, "change Claude authorization mode"))) {
+    return;
+  }
+
+  setClaudeConfig({ authMode: next });
+  const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
+  disposeClaudeRuntime(session.id);
+
+  const warning =
+    next === "bypass"
+      ? "\nWarning: bypass skips Claude permission checks for this service."
+      : "";
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    next === current
+      ? `Claude auth mode unchanged: ${next}. Runtime restarted for this chat.${warning}`
+      : `Claude auth mode changed: ${current} -> ${next}. Runtime restarted for this chat.${warning}`
+  );
+}
+
+function parseClaudeAuthMode(value: string): ClaudeAuthMode | null {
+  if (value === "on") {
+    return "auto";
+  }
+  if (value === "off" || value === "manual") {
+    return "ask";
+  }
+  if (value === "edits" || value === "acceptedits") {
+    return "accept-edits";
+  }
+  if (value === "danger" || value === "skip") {
+    return "bypass";
+  }
+  if (
+    value === "safe" ||
+    value === "ask" ||
+    value === "auto" ||
+    value === "accept-edits" ||
+    value === "deny" ||
+    value === "bypass"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 async function handleCodexSandboxCommand(
@@ -629,7 +716,7 @@ async function executeClaudeRequest(
   markPromptStarted(session);
 
   console.log(
-    `[Execute] Running Claude Agent SDK in ${session.workDir} (resume: ${session.claudeSessionId ?? "new"})...`
+    `[Execute] Running Claude Agent SDK in ${session.workDir} (resume: ${session.claudeSessionId ?? "new"}, auth: ${config.authMode ?? "safe"})...`
   );
 
   const streamReply = new ClaudeStreamingReply(context.client, event.messageId);
@@ -641,6 +728,7 @@ async function executeClaudeRequest(
     resumeSessionId: session.claudeSessionId,
     timeout: config.timeoutMs,
     maxTurns: config.maxTurns,
+    authMode: config.authMode ?? "safe",
     interruptSignal,
     onStreamEvent: (streamEvent) => streamReply.handleEvent(streamEvent),
     onToolPermission: (permission) =>

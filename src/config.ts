@@ -13,9 +13,11 @@ export interface ClaudeConfig {
   defaultWorkDir: string;
   maxTurns: number;
   timeoutMs: number;
+  authMode: ClaudeAuthMode;
 }
 
 export type AgentProvider = "claude" | "codex";
+export type ClaudeAuthMode = "safe" | "ask" | "auto" | "accept-edits" | "deny" | "bypass";
 export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface CodexConfig {
@@ -43,6 +45,7 @@ const defaults: AppConfig = {
     defaultWorkDir: homedir(),
     maxTurns: 20,
     timeoutMs: 300000,
+    authMode: "safe",
   },
   codex: {
     model: "gpt-5.3-codex",

@@ -4,6 +4,7 @@ import type {
   CanUseTool,
   HookCallback,
   HookJSONOutput,
+  PermissionMode,
   PermissionResult,
   PermissionUpdate,
   PreToolUseHookInput,
@@ -12,6 +13,7 @@ import type {
   SDKResultMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import type { ClaudeAuthMode } from "../config.js";
 
 const require = createRequire(import.meta.url);
 
@@ -53,6 +55,7 @@ export interface ExecuteOptions {
   resumeSessionId?: string;
   timeout: number;
   maxTurns: number;
+  authMode?: ClaudeAuthMode;
   interruptSignal?: AbortSignal;
   onStreamEvent?: (event: ClaudeStreamEvent) => Promise<void> | void;
   onToolPermission?: ClaudeToolPermissionHandler;
@@ -69,6 +72,7 @@ let cachedClaudeCodeExecutablePath: string | undefined | null;
 interface ClaudeRuntime {
   key: string;
   workDir: string;
+  authMode: ClaudeAuthMode;
   input: ClaudeInputQueue;
   query: Query;
   iterator: AsyncIterator<SDKMessage>;
@@ -87,6 +91,17 @@ interface ToolPermissionContext {
 }
 
 const claudeRuntimes = new Map<string, ClaudeRuntime>();
+const DEFAULT_CLAUDE_AUTH_MODE: ClaudeAuthMode = "safe";
+const READ_ONLY_CLAUDE_TOOLS = new Set([
+  "Glob",
+  "Grep",
+  "LS",
+  "Read",
+  "TodoRead",
+  "TodoWrite",
+  "WebFetch",
+  "WebSearch",
+]);
 
 /**
  * Execute a prompt through the Claude Agent SDK.
@@ -421,6 +436,49 @@ function createBashPreToolUseHook(runtime: ClaudeRuntime): HookCallback {
   };
 }
 
+function buildClaudePermissionOptions(runtime: ClaudeRuntime): {
+  canUseTool?: CanUseTool;
+  hooks?: { PreToolUse: { matcher: string; hooks: HookCallback[]; timeout: number }[] };
+} {
+  if (runtime.authMode === "auto" || runtime.authMode === "bypass") {
+    return {};
+  }
+
+  return {
+    canUseTool: createCanUseTool(runtime),
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Bash",
+          hooks: [createBashPreToolUseHook(runtime)],
+          timeout: 310,
+        },
+      ],
+    },
+  };
+}
+
+function normalizeClaudeAuthMode(authMode?: ClaudeAuthMode): ClaudeAuthMode {
+  return authMode ?? DEFAULT_CLAUDE_AUTH_MODE;
+}
+
+function getClaudeSdkPermissionMode(authMode: ClaudeAuthMode): PermissionMode {
+  switch (authMode) {
+    case "auto":
+      return "auto";
+    case "accept-edits":
+      return "acceptEdits";
+    case "deny":
+      return "dontAsk";
+    case "bypass":
+      return "bypassPermissions";
+    case "ask":
+    case "safe":
+    default:
+      return "default";
+  }
+}
+
 async function decideToolPermission(
   runtime: ClaudeRuntime,
   toolName: string,
@@ -428,12 +486,13 @@ async function decideToolPermission(
   permissionOptions: ToolPermissionContext
 ): Promise<PermissionResult> {
   const toolUseID = permissionOptions.toolUseID ?? "";
+  const authMode = runtime.authMode ?? DEFAULT_CLAUDE_AUTH_MODE;
   const command = toolName === "Bash" ? getBashCommand(input) : "";
   console.log(
-    `[Permission] tool=${toolName} command=${command || "-"} handler=${runtime.permissionHandler ? "yes" : "no"}`
+    `[Permission] mode=${authMode} tool=${toolName} command=${command || "-"} handler=${runtime.permissionHandler ? "yes" : "no"}`
   );
 
-  if (toolName !== "Bash") {
+  if (authMode === "bypass") {
     return {
       behavior: "allow",
       updatedInput: input,
@@ -442,7 +501,28 @@ async function decideToolPermission(
     };
   }
 
-  if (command && isAllowedBashCommand(command)) {
+  if (toolName !== "Bash") {
+    if (
+      authMode === "safe" ||
+      authMode === "accept-edits" ||
+      READ_ONLY_CLAUDE_TOOLS.has(toolName)
+    ) {
+      return {
+        behavior: "allow",
+        updatedInput: input,
+        toolUseID,
+        decisionClassification: "user_temporary",
+      };
+    }
+
+    if (authMode === "deny") {
+      return denyToolPermission(runtime, toolName, toolUseID);
+    }
+
+    return requestToolPermission(runtime, toolName, input, permissionOptions);
+  }
+
+  if (command && authMode !== "ask" && isAllowedBashCommand(command)) {
     console.log(`[Permission] Auto-allow safe Bash command: ${command}`);
     return {
       behavior: "allow",
@@ -455,8 +535,25 @@ async function decideToolPermission(
   const message = command
     ? `${DENIED_BASH_MESSAGE}: ${command}`
     : `${DENIED_BASH_MESSAGE}: missing command`;
+
+  if (authMode === "deny") {
+    return denyToolPermission(runtime, toolName, toolUseID, message);
+  }
+
+  return requestToolPermission(runtime, toolName, input, permissionOptions, message);
+}
+
+function requestToolPermission(
+  runtime: ClaudeRuntime,
+  toolName: string,
+  input: Record<string, unknown>,
+  permissionOptions: ToolPermissionContext,
+  deniedMessage?: string
+): Promise<PermissionResult> | PermissionResult {
+  const toolUseID = permissionOptions.toolUseID ?? "";
+  const command = toolName === "Bash" ? getBashCommand(input) : "";
   if (runtime.permissionHandler) {
-    console.log(`[Permission] Requesting Feishu approval for Bash command: ${command || "(missing)"}`);
+    console.log(`[Permission] Requesting Feishu approval for ${toolName}: ${command || "(no command)"}`);
     return runtime.permissionHandler({
       toolName,
       input,
@@ -469,9 +566,30 @@ async function decideToolPermission(
     });
   }
 
-  console.log(`[Permission] Denying Bash command without Feishu handler: ${command || "(missing)"}`);
+  const message =
+    deniedMessage ||
+    (command
+      ? `${DENIED_BASH_MESSAGE}: ${command}`
+      : `Tool denied by raven-ts auth mode: ${toolName}`);
+  console.log(`[Permission] Denying tool without Feishu handler: ${toolName}`);
   runtime.deniedCommands?.push(message);
 
+  return {
+    behavior: "deny",
+    message,
+    toolUseID,
+    decisionClassification: "user_reject",
+  };
+}
+
+function denyToolPermission(
+  runtime: ClaudeRuntime,
+  toolName: string,
+  toolUseID: string,
+  message = `Tool denied by raven-ts auth mode: ${toolName}`
+): PermissionResult {
+  console.log(`[Permission] Denying tool by auth mode: ${toolName}`);
+  runtime.deniedCommands?.push(message);
   return {
     behavior: "deny",
     message,
@@ -484,8 +602,9 @@ async function getOrCreateClaudeRuntime(
   key: string,
   options: ExecuteOptions
 ): Promise<ClaudeRuntime> {
+  const authMode = normalizeClaudeAuthMode(options.authMode);
   const existing = claudeRuntimes.get(key);
-  if (existing && existing.workDir === options.workDir) {
+  if (existing && existing.workDir === options.workDir && existing.authMode === authMode) {
     return existing;
   }
 
@@ -498,15 +617,17 @@ async function getOrCreateClaudeRuntime(
   const runtime = {
     key,
     workDir: options.workDir,
+    authMode,
     input,
   } as ClaudeRuntime;
+  const permissionOptions = buildClaudePermissionOptions(runtime);
 
   const stream = query({
     prompt: input,
     options: {
       cwd: options.workDir,
       resume: options.resumeSessionId,
-      permissionMode: "default",
+      permissionMode: getClaudeSdkPermissionMode(authMode),
       tools: { type: "preset", preset: "claude_code" },
       allowedTools: ["WebSearch", "WebFetch"],
       systemPrompt: {
@@ -517,16 +638,8 @@ async function getOrCreateClaudeRuntime(
       env: process.env,
       maxTurns: options.maxTurns,
       pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
-      canUseTool: createCanUseTool(runtime),
-      hooks: {
-        PreToolUse: [
-          {
-            matcher: "Bash",
-            hooks: [createBashPreToolUseHook(runtime)],
-            timeout: 310,
-          },
-        ],
-      },
+      allowDangerouslySkipPermissions: authMode === "bypass" ? true : undefined,
+      ...permissionOptions,
     },
   });
 

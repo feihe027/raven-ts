@@ -182,6 +182,7 @@ Send commands in Feishu/Lark:
 /r claude
 /r codex
 /r restart
+/r auth [status|safe|ask|auto|accept-edits|deny|bypass]
 /r sandbox [status|on|off]
 ```
 
@@ -191,6 +192,7 @@ Command behavior:
 - `/r cd <path>` changes the work directory and clears the current agent context.
 - `/r clear` clears the current chat's agent session while keeping the work directory.
 - `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new SDK runner and resumes the saved thread.
+- `/r auth status|safe|ask|auto|accept-edits|deny|bypass` shows or changes the Claude authorization mode. `on` maps to `auto`; `off` maps to `ask`.
 - `/r sandbox status|on|off` shows or changes the Codex sandbox mode. `on` maps to `workspace-write`; `off` maps to `danger-full-access`.
 - `/r claude` and `/r codex` switch the backend.
 - `!your message` interrupts the current run and starts a fresh run with the new prompt.
@@ -242,10 +244,20 @@ raven-ts config set agent.provider claude
 raven-ts config set claude.defaultWorkDir C:\repo\project
 raven-ts config set claude.maxTurns 20
 raven-ts config set claude.timeoutMs 300000
+raven-ts config set claude.authMode safe
 ```
 
 Claude responses store a `claudeSessionId` and later messages resume that SDK session.
 If a second message arrives while Claude is still running, `raven-ts` queues it instead of starting a concurrent Claude turn.
+
+Claude auth modes:
+
+- `safe`: raven-ts default. Auto-allow read-only tools and safe Bash commands; request Feishu approval for other Bash commands.
+- `ask`: request Feishu approval for write tools and Bash commands.
+- `auto`: use Claude's automatic permission decisions.
+- `accept-edits`: auto-accept edit operations while keeping raven-ts Bash checks.
+- `deny`: deny non-preapproved operations instead of asking.
+- `bypass`: skip Claude permission checks. Use only in an externally sandboxed environment.
 
 ## Windows Notes
 

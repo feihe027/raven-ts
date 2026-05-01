@@ -71,6 +71,7 @@ export async function statusCommand(): Promise<void> {
   console.log(`  Default work dir: ${claudeConfig.defaultWorkDir}`);
   console.log(`  Max turns: ${claudeConfig.maxTurns}`);
   console.log(`  Timeout: ${claudeConfig.timeoutMs}ms`);
+  console.log(`  Claude auth: ${claudeConfig.authMode ?? "safe"}`);
   const codexConfig = getCodexConfig();
   console.log(`  Codex runtime: ${getCodexRuntimeDescription()}`);
   console.log(`  Codex model: ${codexConfig.model || "gpt-5.3-codex"}`);

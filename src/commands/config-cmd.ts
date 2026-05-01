@@ -10,6 +10,7 @@ import {
   setFeishuConfig,
   setClaudeConfig,
   type AgentProvider,
+  type ClaudeConfig,
   type CodexConfig,
   type FeishuConfig,
 } from "../config.js";
@@ -35,6 +36,7 @@ export async function configCommand(action: string, key?: string, value?: string
         console.log("  claude.defaultWorkDir");
         console.log("  claude.maxTurns");
         console.log("  claude.timeoutMs");
+        console.log("  claude.authMode");
         console.log("  codex.model");
         console.log("  codex.codexBin");
         console.log("  codex.reasoningEffort");
@@ -86,6 +88,7 @@ function showConfig(): void {
   console.log(`  defaultWorkDir: ${claude.defaultWorkDir}`);
   console.log(`  maxTurns: ${claude.maxTurns}`);
   console.log(`  timeoutMs: ${claude.timeoutMs}`);
+  console.log(`  authMode: ${claude.authMode ?? "safe"}`);
   console.log();
 
   console.log(chalk.bold("Codex:"));
@@ -185,6 +188,12 @@ function setClaudeValue(key: string, subkey: string, value: string): void {
       setClaudeConfig({ timeoutMs: parsed });
       break;
     }
+    case "authMode": {
+      const parsed = parseClaudeAuthMode(value);
+      if (!parsed) return;
+      setClaudeConfig({ authMode: parsed });
+      break;
+    }
     default:
       console.log(chalk.red(`Unknown key: claude.${subkey}`));
       return;
@@ -243,6 +252,36 @@ function setCodexValue(key: string, subkey: string, value: string): void {
 
   setCodexConfig(patch);
   console.log(chalk.green(`Set ${key}`));
+}
+
+function parseClaudeAuthMode(value: string): ClaudeConfig["authMode"] | null {
+  const normalized = value.toLowerCase();
+  if (normalized === "on") {
+    return "auto";
+  }
+  if (normalized === "off" || normalized === "manual") {
+    return "ask";
+  }
+  if (normalized === "edits" || normalized === "acceptedits") {
+    return "accept-edits";
+  }
+  if (normalized === "danger" || normalized === "skip") {
+    return "bypass";
+  }
+  if (
+    normalized === "safe" ||
+    normalized === "ask" ||
+    normalized === "auto" ||
+    normalized === "accept-edits" ||
+    normalized === "deny" ||
+    normalized === "bypass"
+  ) {
+    return normalized;
+  }
+  console.log(
+    chalk.red("claude.authMode must be safe, ask, auto, accept-edits, deny, bypass, on, or off")
+  );
+  return null;
 }
 
 function parsePositiveInteger(value: string, key: string): number | null {

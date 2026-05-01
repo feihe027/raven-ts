@@ -178,6 +178,7 @@ Windows 日志路径：
 /r claude
 /r codex
 /r restart
+/r auth [status|safe|ask|auto|accept-edits|deny|bypass]
 /r sandbox [status|on|off]
 ```
 
@@ -186,6 +187,7 @@ Windows 日志路径：
 - `/r cd <path>` 修改工作目录，并清空当前 Agent 上下文。
 - `/r clear` 清空当前聊天的 Agent 会话，同时保留工作目录。
 - `/r restart` 释放当前聊天的 Codex runtime；下一次 Codex 请求会启动新的 SDK runner，并恢复已保存的 thread。
+- `/r auth status|safe|ask|auto|accept-edits|deny|bypass` 查看或修改 Claude 授权模式。`on` 对应 `auto`，`off` 对应 `ask`。
 - `/r sandbox status|on|off` 查看或修改 Codex 沙箱模式。`on` 对应 `workspace-write`，`off` 对应 `danger-full-access`。
 - `/r claude` 和 `/r codex` 切换 Agent 后端。
 
@@ -236,9 +238,19 @@ raven-ts config set agent.provider claude
 raven-ts config set claude.defaultWorkDir C:\repo\project
 raven-ts config set claude.maxTurns 20
 raven-ts config set claude.timeoutMs 300000
+raven-ts config set claude.authMode safe
 ```
 
 Claude 回复会保存 `claudeSessionId`，后续消息会恢复该 SDK session。
+
+Claude 授权模式：
+
+- `safe`：raven-ts 默认策略。自动允许只读工具和安全 Bash 命令，其他 Bash 命令弹出飞书授权按钮。
+- `ask`：写入类工具和 Bash 命令都弹出飞书授权按钮。
+- `auto`：使用 Claude 自身的自动权限判断。
+- `accept-edits`：自动接受编辑操作，同时保留 raven-ts 的 Bash 检查。
+- `deny`：未预授权的操作直接拒绝，不弹授权按钮。
+- `bypass`：跳过 Claude 权限检查。只建议在外部已有沙箱保护时使用。
 
 ## Windows 说明
 
