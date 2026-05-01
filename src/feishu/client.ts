@@ -37,12 +37,23 @@ export function createFeishuClient(config: FeishuConfig): Lark.Client {
   });
 }
 
-export function createFeishuWSClient(config: FeishuConfig): Lark.WSClient {
+export interface FeishuWSLifecycleHandlers {
+  onReady?: () => void;
+  onError?: (error: Error) => void;
+  onReconnecting?: () => void;
+  onReconnected?: () => void;
+}
+
+export function createFeishuWSClient(
+  config: FeishuConfig,
+  lifecycleHandlers: FeishuWSLifecycleHandlers = {}
+): Lark.WSClient {
   return new Lark.WSClient({
     appId: config.appId,
     appSecret: config.appSecret,
     domain: resolveDomain(config.domain),
     loggerLevel: Lark.LoggerLevel.info,
+    ...lifecycleHandlers,
   });
 }
 

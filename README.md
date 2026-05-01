@@ -12,6 +12,8 @@ Users send messages in Feishu/Lark. `raven-ts` receives them through the bot Web
 - Runtime switching from chat with `/r claude` and `/r codex`.
 - Codex through the official `@openai/codex-sdk` `runStreamed()` API.
 - Codex streams text in real time and reads token usage from the final `turn.completed` event.
+- Final reply cards include collapsed intermediate details for reasoning summaries, tool calls, and agent events.
+- Claude unsafe Bash tool calls can be approved or denied from Feishu permission cards.
 - Codex thread IDs are persisted per chat, so context is resumed across turns.
 - Claude per-chat queueing, plus `!prompt` interrupt-and-run behavior inspired by `agent-feishu-channel`.
 - `/r stop` to stop the active run and clear queued Claude prompts.

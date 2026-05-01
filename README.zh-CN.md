@@ -12,6 +12,8 @@
 - 支持在聊天中通过 `/r claude` 和 `/r codex` 动态切换运行后端。
 - 通过官方 `@openai/codex-sdk` 的 `runStreamed()` API 调用 Codex。
 - Codex 实时流式输出文本，并从最终 `turn.completed` 事件读取 token usage。
+- 最终回复卡片会默认折叠展示推理摘要、工具调用和中间事件详情。
+- Claude 的高风险 Bash 工具调用可以通过飞书授权卡片允许或拒绝。
 - Codex thread id 按聊天持久化保存，后续 turn 会恢复上下文。
 - 按聊天维护工作目录和 Agent 会话绑定。
 - 支持 Windows 后台服务，包含 PID、日志、状态检查和隐藏控制台窗口。

@@ -27,7 +27,14 @@ import {
   replyWithCard,
   MessageEvent,
 } from "./client.js";
-import { AgentStreamingReply, ClaudeStreamingReply } from "./streaming.js";
+import { ClaudeStreamingReply, CodexStreamingReply } from "./streaming.js";
+import {
+  cancelPendingToolPermissions,
+  handleFeishuCardAction,
+  requestFeishuToolPermission,
+  resolvePendingToolPermissionByText,
+  type PermissionChoice,
+} from "./permission.js";
 import {
   clearSession,
   createSession,
@@ -244,20 +251,25 @@ export async function handleFeishuMessage(
     return;
   }
 
-  const interruptPrompt = parseInterruptPrompt(trimmedContent);
-  if (interruptPrompt) {
-    await handleAgentRequest(interruptPrompt, messageEvent, context, { interrupt: true });
-    return;
-  }
+  try {
+    const interruptPrompt = parseInterruptPrompt(trimmedContent);
+    if (interruptPrompt) {
+      await handleAgentRequest(interruptPrompt, messageEvent, context, { interrupt: true });
+      return;
+    }
 
-  // Handle commands
-  if (trimmedContent.startsWith(COMMAND_PREFIX)) {
-    await handleCommand(trimmedContent, messageEvent, context);
-    return;
-  }
+    // Handle commands
+    if (trimmedContent.startsWith(COMMAND_PREFIX)) {
+      await handleCommand(trimmedContent, messageEvent, context);
+      return;
+    }
 
-  // Regular message - execute the configured agent SDK
-  await handleAgentRequest(trimmedContent, messageEvent, context);
+    // Regular message - execute the configured agent SDK
+    await handleAgentRequest(trimmedContent, messageEvent, context);
+  } catch (err) {
+    console.error("[Message] Failed to handle Feishu message:", err);
+    await replyUnexpectedHandlerError(messageEvent, context, err);
+  }
 }
 
 /**
@@ -285,6 +297,8 @@ async function handleCommand(
 \`/r claude\` - Switch to Claude
 \`/r codex\` - Switch to Codex
 \`/r stop\` - Stop the current run and clear queued Claude prompts
+\`/r allow <id>\` - Approve a pending Claude tool permission
+\`/r deny <id>\` - Deny a pending Claude tool permission
 \`/r restart\` - Restart Codex runtime for this chat
 \`/r clear\` / \`/r reset\` - Clear agent session and restart Claude runtime
 \`/r status\` - Show session status
@@ -394,6 +408,12 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
       break;
     }
 
+    case "allow":
+    case "deny": {
+      await handleToolPermissionCommand(command, args, event, context);
+      break;
+    }
+
     case "status": {
       const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
       const claudeAvailable = await checkClaudeSdkAvailable();
@@ -423,6 +443,56 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
         event.messageId,
         `Unknown command: ${command}\nType /r help for available commands.`
       );
+  }
+}
+
+async function handleToolPermissionCommand(
+  command: PermissionChoice,
+  args: string[],
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const requestIdOrPrefix = args[1]?.trim();
+  if (!requestIdOrPrefix) {
+    await replyToMessage(context.client, event.messageId, `Usage: /r ${command} <approval-id>`);
+    return;
+  }
+
+  const result = await resolvePendingToolPermissionByText({
+    requestIdOrPrefix,
+    senderOpenId: event.senderId,
+    choice: command,
+  });
+
+  switch (result.status) {
+    case "resolved":
+      await replyToMessage(
+        context.client,
+        event.messageId,
+        `${command === "allow" ? "Approved" : "Denied"} pending ${result.toolName ?? "tool"} permission.`
+      );
+      return;
+    case "forbidden":
+      await replyToMessage(
+        context.client,
+        event.messageId,
+        "Only the user who started this run can approve or deny this tool call."
+      );
+      return;
+    case "ambiguous":
+      await replyToMessage(
+        context.client,
+        event.messageId,
+        "Approval ID prefix is ambiguous. Use more characters from the approval ID."
+      );
+      return;
+    case "not_found":
+      await replyToMessage(
+        context.client,
+        event.messageId,
+        "No pending permission request matched that approval ID. It may have expired, been resolved, or been lost during a service restart."
+      );
+      return;
   }
 }
 
@@ -504,6 +574,20 @@ async function executeClaudeRequest(
     maxTurns: config.maxTurns,
     interruptSignal,
     onStreamEvent: (streamEvent) => streamReply.handleEvent(streamEvent),
+    onToolPermission: (permission) =>
+      requestFeishuToolPermission({
+        client: context.client,
+        parentMessageId: event.messageId,
+        ownerOpenId: event.senderId,
+        toolName: permission.toolName,
+        input: permission.input,
+        toolUseId: permission.toolUseId,
+        signal: permission.signal,
+        title: permission.title,
+        displayName: permission.displayName,
+        description: permission.description,
+        suggestions: permission.suggestions,
+      }),
   });
 
   if (result.claudeSessionId) {
@@ -556,12 +640,7 @@ async function handleCodexRequest(
     `[Execute] Running Codex Agent SDK in ${session.workDir} (resume: ${session.codexThreadId ?? "new"})...`
   );
 
-  const streamReply = new AgentStreamingReply(context.client, event.messageId, {
-    agentName: "Codex",
-    elementId: "codex_stream_md",
-    initialStatus: "Codex is working...",
-    streamingTitle: "Codex streaming...",
-  });
+  const streamReply = new CodexStreamingReply(context.client, event.messageId);
   const mayInjectIntoActiveRun = isCodexRunActive(session.id);
   if (!mayInjectIntoActiveRun) {
     await streamReply.start();
@@ -573,6 +652,7 @@ async function handleCodexRequest(
     resumeThreadId: session.codexThreadId,
     config: codexConfig,
     onTextDelta: (delta) => streamReply.appendText(delta, "delta"),
+    onStreamEvent: (streamEvent) => streamReply.handleEvent(streamEvent),
   });
 
   if (result.codexThreadId) {
@@ -729,7 +809,14 @@ async function interruptClaudeAndRun(
 
   await notifyDroppedQueuedRequests(dropped, "Claude", "bang_prefix");
 
+  const currentParentMessageId = state.current?.request.event.messageId;
   state.current?.abortController.abort();
+  if (currentParentMessageId) {
+    cancelPendingToolPermissions(
+      "Claude run interrupted by a newer ! message.",
+      currentParentMessageId
+    );
+  }
 
   await replyToMessage(
     context.client,
@@ -775,7 +862,11 @@ async function stopActiveRun(event: MessageEvent, context: HandlerContext): Prom
     state.interruptReason = "stop";
 
     await notifyDroppedQueuedRequests(dropped, "Claude", "stop");
+    const currentParentMessageId = state.current?.request.event.messageId;
     state.current?.abortController.abort();
+    if (currentParentMessageId) {
+      cancelPendingToolPermissions("Claude run stopped by /r stop.", currentParentMessageId);
+    }
 
     await replyToMessage(
       context.client,
@@ -849,6 +940,23 @@ async function replyExecutionResult(
     } catch (replyError) {
       console.error(`[Reply] Failed to send error message:`, replyError);
     }
+  }
+}
+
+async function replyUnexpectedHandlerError(
+  event: MessageEvent,
+  context: HandlerContext,
+  err: unknown
+): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      `raven-ts failed before sending an agent reply: ${truncateForFeishu(message, 1200)}`
+    );
+  } catch (replyError) {
+    console.error("[Reply] Failed to send unexpected handler error:", replyError);
   }
 }
 
@@ -1049,21 +1157,78 @@ export async function startFeishuListener(
 
   // Create client and dispatcher
   const client = createFeishuClient(config);
-  const wsClient = createFeishuWSClient(config);
+  let resolveReady: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+  const wsClient = createFeishuWSClient(config, {
+    onReady: () => {
+      console.log("[Feishu] WebSocket ready");
+      resolveReady?.();
+      resolveReady = undefined;
+    },
+    onReconnecting: () => {
+      console.warn("[Feishu] WebSocket reconnecting...");
+    },
+    onReconnected: () => {
+      console.log("[Feishu] WebSocket reconnected");
+      resolveReady?.();
+      resolveReady = undefined;
+    },
+    onError: (err) => {
+      console.error("[Feishu] WebSocket error:", err);
+    },
+  });
   const eventDispatcher = createEventDispatcher(config);
 
   // Register event handlers
   eventDispatcher.register({
     "im.message.receive_v1": async (data) => {
-      await onMessage(data, { client, botOpenId: botOpenId ?? "" });
+      void onMessage(data, { client, botOpenId: botOpenId ?? "" }).catch((err) => {
+        console.error("[Message] Feishu message handler failed:", err);
+      });
+    },
+    "card.action.trigger": async (data: unknown) => {
+      try {
+        const result = await handleFeishuCardAction(data);
+        if (result.card) {
+          return { card: { type: "raw", data: result.card } };
+        }
+      } catch (err) {
+        console.error("[Permission] Failed to handle Feishu card action:", err);
+      }
+      return {};
     },
     "im.message.message_read_v1": async () => {
       // Read receipts are not used by raven-ts.
     },
+    "im.chat.access_event.bot_p2p_chat_entered_v1": async () => {
+      // Chat-open notifications are not used by raven-ts.
+    },
   });
 
   // Start WebSocket
-  wsClient.start({ eventDispatcher });
+  void wsClient.start({ eventDispatcher }).catch((err) => {
+    console.error("[Feishu] WebSocket start failed:", err);
+  });
+  await waitForWebSocketReady(ready);
 
   return { wsClient, botOpenId: botOpenId ?? "" };
+}
+
+async function waitForWebSocketReady(ready: Promise<void>): Promise<void> {
+  let timedOut = false;
+  await Promise.race([
+    ready,
+    new Promise<void>((resolve) => {
+      setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, 15000);
+    }),
+  ]);
+
+  if (timedOut) {
+    console.warn("[Feishu] WebSocket did not report ready within 15s; continuing startup.");
+  }
 }

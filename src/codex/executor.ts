@@ -28,7 +28,38 @@ export interface ExecuteCodexOptions {
   resumeThreadId?: string;
   config: CodexConfig;
   onTextDelta?: (delta: string) => Promise<void> | void;
+  onStreamEvent?: (event: CodexStreamEvent) => Promise<void> | void;
 }
+
+export type CodexStreamEvent =
+  | { type: "reasoning"; id: string; text: string }
+  | {
+      type: "command_execution";
+      id: string;
+      command: string;
+      output: string;
+      status: "in_progress" | "completed" | "failed";
+      exitCode?: number;
+    }
+  | {
+      type: "file_change";
+      id: string;
+      status: "completed" | "failed";
+      changes: Array<{ path: string; kind: "add" | "delete" | "update" }>;
+    }
+  | {
+      type: "mcp_tool_call";
+      id: string;
+      server: string;
+      tool: string;
+      arguments: unknown;
+      status: "in_progress" | "completed" | "failed";
+      result?: unknown;
+      error?: { message: string };
+    }
+  | { type: "web_search"; id: string; query: string }
+  | { type: "todo_list"; id: string; items: Array<{ text: string; completed: boolean }> }
+  | { type: "error"; id: string; message: string };
 
 interface ActiveRun {
   abortController: AbortController;
@@ -119,6 +150,10 @@ export async function executeCodex(
           if (delta) {
             output += delta;
             await emitTextDelta(options.onTextDelta, delta);
+          }
+          const streamEvent = getCodexStreamEvent(event.item);
+          if (streamEvent) {
+            await emitCodexStreamEvent(options.onStreamEvent, streamEvent);
           }
           continue;
         }
@@ -322,6 +357,48 @@ function getTextDelta(item: ThreadItem, textCache: Map<string, string>): string 
   return "";
 }
 
+function getCodexStreamEvent(item: ThreadItem): CodexStreamEvent | undefined {
+  switch (item.type) {
+    case "reasoning":
+      return item.text ? { type: "reasoning", id: item.id, text: item.text } : undefined;
+    case "command_execution":
+      return {
+        type: "command_execution",
+        id: item.id,
+        command: item.command,
+        output: item.aggregated_output,
+        status: item.status,
+        exitCode: item.exit_code,
+      };
+    case "file_change":
+      return {
+        type: "file_change",
+        id: item.id,
+        status: item.status,
+        changes: item.changes,
+      };
+    case "mcp_tool_call":
+      return {
+        type: "mcp_tool_call",
+        id: item.id,
+        server: item.server,
+        tool: item.tool,
+        arguments: item.arguments,
+        status: item.status,
+        result: item.result,
+        error: item.error,
+      };
+    case "web_search":
+      return { type: "web_search", id: item.id, query: item.query };
+    case "todo_list":
+      return { type: "todo_list", id: item.id, items: item.items };
+    case "error":
+      return { type: "error", id: item.id, message: item.message };
+    case "agent_message":
+      return undefined;
+  }
+}
+
 function deltaText(cache: Map<string, string>, id: string, next: string): string {
   const previous = cache.get(id) ?? "";
   cache.set(id, next);
@@ -367,5 +444,20 @@ async function emitTextDelta(
     await handler(delta);
   } catch (err) {
     console.error("[Stream] Codex text delta handler failed:", err);
+  }
+}
+
+async function emitCodexStreamEvent(
+  handler: ExecuteCodexOptions["onStreamEvent"],
+  event: CodexStreamEvent
+): Promise<void> {
+  if (!handler) {
+    return;
+  }
+
+  try {
+    await handler(event);
+  } catch (err) {
+    console.error("[Stream] Codex stream event handler failed:", err);
   }
 }

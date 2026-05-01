@@ -2,7 +2,11 @@ import { spawnSync } from "child_process";
 import { createRequire } from "module";
 import type {
   CanUseTool,
+  HookCallback,
+  HookJSONOutput,
   PermissionResult,
+  PermissionUpdate,
+  PreToolUseHookInput,
   Query,
   SDKMessage,
   SDKResultMessage,
@@ -28,6 +32,21 @@ export type ClaudeStreamEvent =
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; toolUseId: string; isError: boolean; text: string };
 
+export interface ClaudeToolPermissionRequest {
+  toolName: string;
+  input: Record<string, unknown>;
+  toolUseId: string;
+  signal: AbortSignal;
+  title?: string;
+  displayName?: string;
+  description?: string;
+  suggestions?: PermissionUpdate[];
+}
+
+export type ClaudeToolPermissionHandler = (
+  request: ClaudeToolPermissionRequest
+) => Promise<PermissionResult>;
+
 export interface ExecuteOptions {
   conversationId?: string;
   workDir: string;
@@ -36,11 +55,12 @@ export interface ExecuteOptions {
   maxTurns: number;
   interruptSignal?: AbortSignal;
   onStreamEvent?: (event: ClaudeStreamEvent) => Promise<void> | void;
+  onToolPermission?: ClaudeToolPermissionHandler;
 }
 
 const DENIED_BASH_MESSAGE = "Bash command denied by raven-ts allowlist";
 const SYSTEM_PROMPT_APPEND = [
-  "raven-ts runs Claude from a Feishu/Lark bot with non-interactive permissions.",
+  "raven-ts runs Claude from a Feishu/Lark bot. Some tools may require approval from a Feishu permission card.",
   "For network access, prefer built-in WebSearch or WebFetch tools. Do not use Bash network commands such as curl, wget, nc, or ad-hoc Python HTTP clients.",
   "If a tool is denied by raven-ts, continue the turn and explain the denied command instead of waiting for manual approval.",
 ].join("\n");
@@ -53,7 +73,17 @@ interface ClaudeRuntime {
   query: Query;
   iterator: AsyncIterator<SDKMessage>;
   deniedCommands?: string[];
+  permissionHandler?: ClaudeToolPermissionHandler;
   claudeSessionId?: string;
+}
+
+interface ToolPermissionContext {
+  toolUseID?: string;
+  signal: AbortSignal;
+  suggestions?: PermissionUpdate[];
+  title?: string;
+  displayName?: string;
+  description?: string;
 }
 
 const claudeRuntimes = new Map<string, ClaudeRuntime>();
@@ -114,6 +144,7 @@ export async function executeClaude(
     runtime = await getOrCreateClaudeRuntime(runtimeKey, options);
     claudeSessionId = runtime.claudeSessionId ?? claudeSessionId;
     runtime.deniedCommands = deniedCommands;
+    runtime.permissionHandler = options.onToolPermission;
     runtime.input.enqueue(createUserMessage(prompt));
 
     while (true) {
@@ -228,6 +259,9 @@ export async function executeClaude(
     }
     if (runtime?.deniedCommands === deniedCommands) {
       runtime.deniedCommands = undefined;
+    }
+    if (runtime && runtime.permissionHandler === options.onToolPermission) {
+      runtime.permissionHandler = undefined;
     }
     options.interruptSignal?.removeEventListener("abort", onInterrupt);
   }
@@ -348,36 +382,101 @@ function canRunClaudeCode(path: string): boolean {
 
 function createCanUseTool(runtime: ClaudeRuntime): CanUseTool {
   return async (toolName, input, permissionOptions): Promise<PermissionResult> => {
-    if (toolName !== "Bash") {
-      return {
-        behavior: "allow",
-        updatedInput: input,
-        toolUseID: permissionOptions.toolUseID,
-        decisionClassification: "user_temporary",
-      };
+    return decideToolPermission(runtime, toolName, input, permissionOptions);
+  };
+}
+
+function createBashPreToolUseHook(runtime: ClaudeRuntime): HookCallback {
+  return async (hookInput, toolUseId, options): Promise<HookJSONOutput> => {
+    if (!isPreToolUseHookInput(hookInput) || hookInput.tool_name !== "Bash") {
+      return {};
     }
 
-    const command = getBashCommand(input);
-    if (command && isAllowedBashCommand(command)) {
+    const input = asRecord(hookInput.tool_input);
+    const result = await decideToolPermission(runtime, "Bash", input, {
+      signal: options.signal,
+      toolUseID: hookInput.tool_use_id || toolUseId,
+      title: "Claude wants to run a Bash command",
+      displayName: "Run Bash command",
+      description: "Approve this command to continue the Claude turn.",
+    });
+
+    if (result.behavior === "allow") {
       return {
-        behavior: "allow",
-        updatedInput: input,
-        toolUseID: permissionOptions.toolUseID,
-        decisionClassification: "user_temporary",
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          updatedInput: result.updatedInput,
+        },
       };
     }
-
-    const message = command
-      ? `${DENIED_BASH_MESSAGE}: ${command}`
-      : `${DENIED_BASH_MESSAGE}: missing command`;
-    runtime.deniedCommands?.push(message);
 
     return {
-      behavior: "deny",
-      message,
-      toolUseID: permissionOptions.toolUseID,
-      decisionClassification: "user_reject",
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: result.message,
+      },
     };
+  };
+}
+
+async function decideToolPermission(
+  runtime: ClaudeRuntime,
+  toolName: string,
+  input: Record<string, unknown>,
+  permissionOptions: ToolPermissionContext
+): Promise<PermissionResult> {
+  const toolUseID = permissionOptions.toolUseID ?? "";
+  const command = toolName === "Bash" ? getBashCommand(input) : "";
+  console.log(
+    `[Permission] tool=${toolName} command=${command || "-"} handler=${runtime.permissionHandler ? "yes" : "no"}`
+  );
+
+  if (toolName !== "Bash") {
+    return {
+      behavior: "allow",
+      updatedInput: input,
+      toolUseID,
+      decisionClassification: "user_temporary",
+    };
+  }
+
+  if (command && isAllowedBashCommand(command)) {
+    console.log(`[Permission] Auto-allow safe Bash command: ${command}`);
+    return {
+      behavior: "allow",
+      updatedInput: input,
+      toolUseID,
+      decisionClassification: "user_temporary",
+    };
+  }
+
+  const message = command
+    ? `${DENIED_BASH_MESSAGE}: ${command}`
+    : `${DENIED_BASH_MESSAGE}: missing command`;
+  if (runtime.permissionHandler) {
+    console.log(`[Permission] Requesting Feishu approval for Bash command: ${command || "(missing)"}`);
+    return runtime.permissionHandler({
+      toolName,
+      input,
+      toolUseId: toolUseID,
+      signal: permissionOptions.signal,
+      title: permissionOptions.title,
+      displayName: permissionOptions.displayName,
+      description: permissionOptions.description,
+      suggestions: permissionOptions.suggestions,
+    });
+  }
+
+  console.log(`[Permission] Denying Bash command without Feishu handler: ${command || "(missing)"}`);
+  runtime.deniedCommands?.push(message);
+
+  return {
+    behavior: "deny",
+    message,
+    toolUseID,
+    decisionClassification: "user_reject",
   };
 }
 
@@ -407,7 +506,7 @@ async function getOrCreateClaudeRuntime(
     options: {
       cwd: options.workDir,
       resume: options.resumeSessionId,
-      permissionMode: "acceptEdits",
+      permissionMode: "default",
       tools: { type: "preset", preset: "claude_code" },
       allowedTools: ["WebSearch", "WebFetch"],
       systemPrompt: {
@@ -419,6 +518,15 @@ async function getOrCreateClaudeRuntime(
       maxTurns: options.maxTurns,
       pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
       canUseTool: createCanUseTool(runtime),
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [createBashPreToolUseHook(runtime)],
+            timeout: 310,
+          },
+        ],
+      },
     },
   });
 
@@ -501,6 +609,20 @@ process.once("exit", () => {
 function getBashCommand(input: Record<string, unknown>): string {
   const command = input.command;
   return typeof command === "string" ? command.trim() : "";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function isPreToolUseHookInput(value: unknown): value is PreToolUseHookInput {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    (value as { hook_event_name?: unknown }).hook_event_name === "PreToolUse"
+  );
 }
 
 export function isAllowedBashCommand(command: string): boolean {
