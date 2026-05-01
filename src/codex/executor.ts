@@ -24,6 +24,7 @@ export interface ExecuteCodexOptions {
   workDir: string;
   resumeThreadId?: string;
   config: CodexConfig;
+  onTextDelta?: (delta: string) => Promise<void> | void;
 }
 
 interface ActiveRun {
@@ -91,6 +92,7 @@ export async function executeCodex(
       (async () => {
         for await (const delta of result.textStream) {
           output += delta;
+          await emitTextDelta(options.onTextDelta, delta);
         }
       })(),
       options.config.timeoutMs
@@ -99,7 +101,9 @@ export async function executeCodex(
     const providerMetadata = await withTimeout(Promise.resolve(result.providerMetadata), 5000).catch(
       () => undefined
     );
-    const usage = await withTimeout(Promise.resolve(result.totalUsage), 5000).catch(() => undefined);
+    const usage = normalizeCodexUsage(
+      await withTimeout(Promise.resolve(result.totalUsage), 5000).catch(() => undefined)
+    );
     const codexThreadId =
       getProviderSessionId(providerMetadata) ?? currentSession?.threadId ?? options.resumeThreadId;
     if (codexThreadId && runtime) {
@@ -111,8 +115,8 @@ export async function executeCodex(
       output: output || "(Codex completed without a final response)",
       duration: Date.now() - startTime,
       codexThreadId,
-      inputTokens: usage?.inputTokens,
-      outputTokens: usage?.outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
     };
   } catch (err) {
     if (isRuntimePoisoningError(err)) {
@@ -293,6 +297,35 @@ function getProviderSessionId(providerMetadata: unknown): string | undefined {
   return typeof sessionId === "string" ? sessionId : undefined;
 }
 
+function normalizeCodexUsage(usage: unknown): { inputTokens?: number; outputTokens?: number } {
+  if (!usage || typeof usage !== "object") {
+    return {};
+  }
+
+  const inputTokens = getNumericProperty(usage, "inputTokens");
+  const outputTokens = getNumericProperty(usage, "outputTokens");
+  if (isCodexPlaceholderUsage(usage, inputTokens, outputTokens)) {
+    return {};
+  }
+
+  return { inputTokens, outputTokens };
+}
+
+function isCodexPlaceholderUsage(
+  _usage: object,
+  inputTokens: number | undefined,
+  outputTokens: number | undefined
+): boolean {
+  // ai-sdk-provider-codex-app-server currently does not expose token counts and
+  // fills AI SDK usage with 0/0 placeholders.
+  return inputTokens === 0 && outputTokens === 0;
+}
+
+function getNumericProperty(source: object, key: string): number | undefined {
+  const value = (source as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function formatCodexError(err: unknown, timeoutMs: number): string {
   if (err instanceof Error) {
     if (err.name === "AbortError" || err.message.toLowerCase().includes("timeout")) {
@@ -322,6 +355,21 @@ function isRuntimePoisoningError(err: unknown): boolean {
     message.includes("invalid state") ||
     message.includes("thread") && message.includes("not found")
   );
+}
+
+async function emitTextDelta(
+  handler: ExecuteCodexOptions["onTextDelta"],
+  delta: string
+): Promise<void> {
+  if (!handler || !delta) {
+    return;
+  }
+
+  try {
+    await handler(delta);
+  } catch (err) {
+    console.error("[Stream] Codex text delta handler failed:", err);
+  }
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

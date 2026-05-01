@@ -8,16 +8,26 @@ import {
 } from "./client.js";
 import type { FeishuCard } from "./client.js";
 
-const STREAM_ELEMENT_ID = "claude_stream_md";
+const DEFAULT_STREAM_ELEMENT_ID = "agent_stream_md";
 const STREAM_UPDATE_INTERVAL_MS = 800;
 const STREAM_CARD_MAX_LENGTH = 28000;
 
-export class ClaudeStreamingReply {
+type StreamAppendMode = "block" | "delta";
+
+export interface AgentStreamingReplyOptions {
+  agentName: string;
+  elementId?: string;
+  initialStatus?: string;
+  streamingTitle?: string;
+  headerTemplate?: string;
+}
+
+export class AgentStreamingReply {
   private messageId: string | undefined;
   private cardId: string | undefined;
   private sequence = 0;
   private text = "";
-  private status = "Claude is working...";
+  private status: string;
   private streamFailed = false;
   private disabled = false;
   private lastFlushAt = 0;
@@ -29,35 +39,25 @@ export class ClaudeStreamingReply {
       }
     | undefined;
   private flushChain: Promise<boolean> = Promise.resolve(false);
+  private readonly agentName: string;
+  private readonly elementId: string;
+  private readonly streamingTitle: string;
+  private readonly headerTemplate: string;
 
   constructor(
     private readonly client: Lark.Client,
-    private readonly parentMessageId: string
-  ) {}
-
-  async start(): Promise<void> {
-    await this.flush("Claude streaming...", this.renderCurrentContent(), false);
+    private readonly parentMessageId: string,
+    options: AgentStreamingReplyOptions
+  ) {
+    this.agentName = options.agentName;
+    this.elementId = options.elementId ?? DEFAULT_STREAM_ELEMENT_ID;
+    this.status = options.initialStatus ?? `${options.agentName} is working...`;
+    this.streamingTitle = options.streamingTitle ?? `${options.agentName} streaming...`;
+    this.headerTemplate = options.headerTemplate ?? "blue";
   }
 
-  async handleEvent(event: ClaudeStreamEvent): Promise<void> {
-    if (event.type === "assistant_text") {
-      await this.appendText(event.text);
-      return;
-    }
-
-    if (event.type === "thinking") {
-      await this.updateStatus("Claude is thinking...");
-      return;
-    }
-
-    if (event.type === "tool_use") {
-      await this.updateStatus(`Claude is using ${event.name}...`);
-      return;
-    }
-
-    await this.updateStatus(
-      event.isError ? `Claude tool ${event.toolUseId} failed.` : `Claude tool ${event.toolUseId} finished.`
-    );
+  async start(): Promise<void> {
+    await this.flush(this.streamingTitle, this.renderCurrentContent(), false);
   }
 
   async finish(markdown: string, title: string): Promise<boolean> {
@@ -68,18 +68,23 @@ export class ClaudeStreamingReply {
     return this.enqueueFlush(title, markdown, true);
   }
 
-  private async appendText(chunk: string): Promise<void> {
+  async appendText(chunk: string, mode: StreamAppendMode = "block"): Promise<void> {
     if (!chunk) {
       return;
     }
 
-    this.text = this.text ? `${this.text}\n\n${chunk}` : chunk;
-    await this.flushThrottled("Claude streaming...", this.renderCurrentContent());
+    if (mode === "delta") {
+      this.text += chunk;
+    } else {
+      this.text = this.text ? `${this.text}\n\n${chunk}` : chunk;
+    }
+
+    await this.flushThrottled(this.streamingTitle, this.renderCurrentContent());
   }
 
-  private async updateStatus(status: string): Promise<void> {
+  async updateStatus(status: string): Promise<void> {
     this.status = status;
-    await this.flushThrottled("Claude streaming...", this.renderCurrentContent());
+    await this.flushThrottled(this.streamingTitle, this.renderCurrentContent());
   }
 
   private renderCurrentContent(): string {
@@ -125,7 +130,7 @@ export class ClaudeStreamingReply {
     const previous = this.flushChain.catch(() => false);
     const next = previous.then(() => this.flushNow(title, markdown, final));
     this.flushChain = next.catch((err) => {
-      console.error("[Stream] Failed to update Claude streaming card:", err);
+      console.error(`[Stream] Failed to update ${this.agentName} streaming card:`, err);
       return false;
     });
     return this.flushChain;
@@ -136,7 +141,11 @@ export class ClaudeStreamingReply {
       return false;
     }
 
-    const card = buildClaudeStreamCard(markdown, title);
+    const card = buildAgentStreamCard(markdown, title, {
+      elementId: this.elementId,
+      fallbackStatus: this.status,
+      headerTemplate: this.headerTemplate,
+    });
     if (!this.messageId) {
       const result = await replyWithInteractiveCard(this.client, this.parentMessageId, card);
       if (!result.messageId) {
@@ -159,8 +168,8 @@ export class ClaudeStreamingReply {
       try {
         await streamCardElementContent(this.client, {
           cardId: this.cardId,
-          elementId: STREAM_ELEMENT_ID,
-          content: formatCardMarkdown(markdown),
+          elementId: this.elementId,
+          content: formatCardMarkdown(markdown, this.status),
           sequence: this.sequence,
         });
         this.lastFlushAt = Date.now();
@@ -187,7 +196,43 @@ export class ClaudeStreamingReply {
   }
 }
 
-function buildClaudeStreamCard(markdown: string, title: string): FeishuCard {
+export class ClaudeStreamingReply extends AgentStreamingReply {
+  constructor(client: Lark.Client, parentMessageId: string) {
+    super(client, parentMessageId, {
+      agentName: "Claude",
+      elementId: "claude_stream_md",
+      initialStatus: "Claude is working...",
+      streamingTitle: "Claude streaming...",
+    });
+  }
+
+  async handleEvent(event: ClaudeStreamEvent): Promise<void> {
+    if (event.type === "assistant_text") {
+      await this.appendText(event.text);
+      return;
+    }
+
+    if (event.type === "thinking") {
+      await this.updateStatus("Claude is thinking...");
+      return;
+    }
+
+    if (event.type === "tool_use") {
+      await this.updateStatus(`Claude is using ${event.name}...`);
+      return;
+    }
+
+    await this.updateStatus(
+      event.isError ? `Claude tool ${event.toolUseId} failed.` : `Claude tool ${event.toolUseId} finished.`
+    );
+  }
+}
+
+function buildAgentStreamCard(
+  markdown: string,
+  title: string,
+  options: { elementId: string; fallbackStatus: string; headerTemplate: string }
+): FeishuCard {
   return {
     schema: "2.0",
     config: {
@@ -202,22 +247,22 @@ function buildClaudeStreamCard(markdown: string, title: string): FeishuCard {
     },
     header: {
       title: { tag: "plain_text", content: title },
-      template: "blue",
+      template: options.headerTemplate,
     },
     body: {
       elements: [
         {
           tag: "markdown",
-          element_id: STREAM_ELEMENT_ID,
-          content: formatCardMarkdown(markdown),
+          element_id: options.elementId,
+          content: formatCardMarkdown(markdown, options.fallbackStatus),
         },
       ],
     },
   };
 }
 
-function formatCardMarkdown(markdown: string): string {
-  const content = markdown.trim() || "_Claude is working..._";
+function formatCardMarkdown(markdown: string, fallbackStatus: string): string {
+  const content = markdown.trim() || `_${fallbackStatus}_`;
   return truncateForFeishu(sanitizeForFeishuMarkdown(content), STREAM_CARD_MAX_LENGTH);
 }
 

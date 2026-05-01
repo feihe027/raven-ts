@@ -27,7 +27,7 @@ import {
   replyWithCard,
   MessageEvent,
 } from "./client.js";
-import { ClaudeStreamingReply } from "./streaming.js";
+import { AgentStreamingReply, ClaudeStreamingReply } from "./streaming.js";
 import {
   clearSession,
   createSession,
@@ -556,11 +556,23 @@ async function handleCodexRequest(
     `[Execute] Running Codex Agent SDK in ${session.workDir} (resume: ${session.codexThreadId ?? "new"})...`
   );
 
+  const streamReply = new AgentStreamingReply(context.client, event.messageId, {
+    agentName: "Codex",
+    elementId: "codex_stream_md",
+    initialStatus: "Codex is working...",
+    streamingTitle: "Codex streaming...",
+  });
+  const mayInjectIntoActiveRun = isCodexRunActive(session.id);
+  if (!mayInjectIntoActiveRun) {
+    await streamReply.start();
+  }
+
   const result = await executeCodex(prompt, {
     conversationId: session.id,
     workDir: session.workDir,
     resumeThreadId: session.codexThreadId,
     config: codexConfig,
+    onTextDelta: (delta) => streamReply.appendText(delta, "delta"),
   });
 
   if (result.codexThreadId) {
@@ -579,12 +591,40 @@ async function handleCodexRequest(
   }
 
   if (result.interrupted) {
-    await replyToMessage(
-      context.client,
-      event.messageId,
-      formatInterruptedReply("Codex", result.interruptReason ?? "stop")
+    const streamed = await streamReply.finish(
+      formatInterruptedReply("Codex", result.interruptReason ?? "stop"),
+      "Codex interrupted"
     );
+    if (!streamed) {
+      await replyToMessage(
+        context.client,
+        event.messageId,
+        formatInterruptedReply("Codex", result.interruptReason ?? "stop")
+      );
+    }
     return;
+  }
+
+  if (result.success) {
+    const responseText = formatSuccessReplyContent(result.output, result.inputTokens, result.outputTokens);
+    const streamed = await streamReply.finish(
+      responseText,
+      `[OK] Codex completed (${formatDuration(result.duration)})`
+    );
+    if (streamed) {
+      console.log(`[Reply] Codex streamed reply finalized successfully`);
+      return;
+    }
+  } else {
+    const errorText = result.error || result.output || "Unknown error";
+    const streamed = await streamReply.finish(
+      `[ERROR] **Codex error**\n\n\`\`\`\n${truncateForFeishu(errorText, 3000)}\n\`\`\``,
+      "Execution Failed"
+    );
+    if (streamed) {
+      console.log(`[Reply] Codex streamed error finalized successfully`);
+      return;
+    }
   }
 
   await replyExecutionResult("Codex", result, event, context);
@@ -892,14 +932,19 @@ function formatSuccessReplyContent(
 }
 
 function formatTokenUsageFooter(inputTokens?: number, outputTokens?: number): string {
-  const input = inputTokens ?? 0;
-  const output = outputTokens ?? 0;
-  const total = input + output;
+  const total =
+    inputTokens !== undefined && outputTokens !== undefined
+      ? formatTokenCount(inputTokens + outputTokens)
+      : "unavailable";
   return [
     "---",
     `**Token usage**  `,
-    `input: \`${formatTokenCount(input)}\` | output: \`${formatTokenCount(output)}\` | total: \`${formatTokenCount(total)}\``,
+    `input: \`${formatOptionalTokenCount(inputTokens)}\` | output: \`${formatOptionalTokenCount(outputTokens)}\` | total: \`${total}\``,
   ].join("\n");
+}
+
+function formatOptionalTokenCount(value: number | undefined): string {
+  return value === undefined ? "unavailable" : formatTokenCount(value);
 }
 
 function formatTokenCount(value: number): string {
