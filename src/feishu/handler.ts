@@ -16,6 +16,8 @@ import {
   getFeishuConfig,
   getClaudeConfig,
   setAgentProvider,
+  setCodexConfig,
+  type CodexSandboxMode,
 } from "../config.js";
 import {
   createFeishuClient,
@@ -297,8 +299,7 @@ async function handleCommand(
 \`/r claude\` - Switch to Claude
 \`/r codex\` - Switch to Codex
 \`/r stop\` - Stop the current run and clear queued Claude prompts
-\`/r allow <id>\` - Approve a pending Claude tool permission
-\`/r deny <id>\` - Deny a pending Claude tool permission
+\`/r sandbox [status|on|off|read-only|workspace-write|danger-full-access]\` - Show or set Codex sandbox mode
 \`/r restart\` - Restart Codex runtime for this chat
 \`/r clear\` / \`/r reset\` - Clear agent session and restart Claude runtime
 \`/r status\` - Show session status
@@ -375,6 +376,11 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
       break;
     }
 
+    case "sandbox": {
+      await handleCodexSandboxCommand(args, event, context);
+      break;
+    }
+
     case "claude":
     case "codex": {
       if (!(await ensureChatIdleForMutation(event, context, "switch agent backend"))) {
@@ -416,6 +422,7 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
 
     case "status": {
       const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
+      const codexConfig = getCodexConfig();
       const claudeAvailable = await checkClaudeSdkAvailable();
       const codexAvailable = await checkCodexSdkAvailable();
       const daemonStatus = await getDaemonStatus();
@@ -428,6 +435,7 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
 **Claude SDK Session:** \`${session.claudeSessionId ?? "none"}\`
 **Codex SDK:** ${codexAvailable ? "Available" : "Not found"}
 **Codex Thread:** \`${session.codexThreadId ?? "none"}\`
+**Codex Sandbox:** \`${codexConfig.sandboxMode ?? "workspace-write"}\`
 **Local Session:** \`${session.id}\`
 **Daemon:** ${daemonStatus.running ? "running" : "not running"} (${daemonStatus.platform})
 **Last Prompt:** ${formatTimestamp(session.lastPromptAt)}
@@ -444,6 +452,67 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
         `Unknown command: ${command}\nType /r help for available commands.`
       );
   }
+}
+
+async function handleCodexSandboxCommand(
+  args: string[],
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const requested = args[1]?.toLowerCase();
+  const current = getCodexConfig().sandboxMode ?? "workspace-write";
+
+  if (!requested || requested === "status") {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      `Codex sandbox mode: ${current}\nUse /r sandbox on to enable workspace-write, or /r sandbox off to use danger-full-access.`
+    );
+    return;
+  }
+
+  const next = parseCodexSandboxMode(requested);
+  if (!next) {
+    await replyToMessage(
+      context.client,
+      event.messageId,
+      "Usage: /r sandbox [status|on|off|read-only|workspace-write|danger-full-access]"
+    );
+    return;
+  }
+
+  if (!(await ensureChatIdleForMutation(event, context, "change Codex sandbox mode"))) {
+    return;
+  }
+
+  setCodexConfig({ sandboxMode: next });
+  const session = getOrCreateSession(event.chatId, getClaudeConfig().defaultWorkDir);
+  disposeCodexRuntime(session.id);
+
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    next === current
+      ? `Codex sandbox mode unchanged: ${next}. Runtime restarted for this chat.`
+      : `Codex sandbox mode changed: ${current} -> ${next}. Runtime restarted for this chat.`
+  );
+}
+
+function parseCodexSandboxMode(value: string): CodexSandboxMode | null {
+  if (value === "on" || value === "true" || value === "workspace") {
+    return "workspace-write";
+  }
+  if (value === "off" || value === "false" || value === "danger") {
+    return "danger-full-access";
+  }
+  if (
+    value === "read-only" ||
+    value === "workspace-write" ||
+    value === "danger-full-access"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 async function handleToolPermissionCommand(

@@ -16,6 +16,7 @@ export interface ClaudeConfig {
 }
 
 export type AgentProvider = "claude" | "codex";
+export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 export interface CodexConfig {
   model?: string;
@@ -24,6 +25,7 @@ export interface CodexConfig {
   timeoutMs: number;
   skipGitRepoCheck: boolean;
   networkAccessEnabled: boolean;
+  sandboxMode: CodexSandboxMode;
 }
 
 export interface AppConfig {
@@ -48,6 +50,7 @@ const defaults: AppConfig = {
     timeoutMs: 300000,
     skipGitRepoCheck: true,
     networkAccessEnabled: true,
+    sandboxMode: "workspace-write",
   },
   agent: {
     provider: "claude",

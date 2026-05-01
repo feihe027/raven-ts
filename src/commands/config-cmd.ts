@@ -41,6 +41,7 @@ export async function configCommand(action: string, key?: string, value?: string
         console.log("  codex.timeoutMs");
         console.log("  codex.skipGitRepoCheck");
         console.log("  codex.networkAccessEnabled");
+        console.log("  codex.sandboxMode");
         return;
       }
       await setConfigValue(key, value);
@@ -94,6 +95,7 @@ function showConfig(): void {
   console.log(`  timeoutMs: ${codex.timeoutMs}`);
   console.log(`  skipGitRepoCheck: ${codex.skipGitRepoCheck}`);
   console.log(`  networkAccessEnabled: ${codex.networkAccessEnabled}`);
+  console.log(`  sandboxMode: ${codex.sandboxMode ?? "workspace-write"}`);
   console.log();
 }
 
@@ -228,6 +230,12 @@ function setCodexValue(key: string, subkey: string, value: string): void {
       patch.networkAccessEnabled = parsed;
       break;
     }
+    case "sandboxMode": {
+      const parsed = parseCodexSandboxMode(value);
+      if (!parsed) return;
+      patch.sandboxMode = parsed;
+      break;
+    }
     default:
       console.log(chalk.red(`Unknown key: codex.${subkey}`));
       return;
@@ -255,5 +263,28 @@ function parseBoolean(value: string, key: string): boolean | null {
     return false;
   }
   console.log(chalk.red(`${key} must be true or false`));
+  return null;
+}
+
+function parseCodexSandboxMode(value: string): CodexConfig["sandboxMode"] | null {
+  const normalized = value.toLowerCase();
+  if (normalized === "on" || normalized === "true" || normalized === "workspace") {
+    return "workspace-write";
+  }
+  if (normalized === "off" || normalized === "false" || normalized === "danger") {
+    return "danger-full-access";
+  }
+  if (
+    normalized === "read-only" ||
+    normalized === "workspace-write" ||
+    normalized === "danger-full-access"
+  ) {
+    return normalized;
+  }
+  console.log(
+    chalk.red(
+      "codex.sandboxMode must be read-only, workspace-write, danger-full-access, on, or off"
+    )
+  );
   return null;
 }

@@ -83,6 +83,9 @@ const BASE_INSTRUCTIONS = [
   "You are Codex, OpenAI's coding agent. You are not Claude.",
   "raven-ts runs Codex from a Feishu/Lark bot with non-interactive permissions.",
   "Do not wait for manual approval. If a command or edit is blocked, explain the blocked action and continue.",
+  "The raven-ts service may run on Windows. Do not invoke bash.exe unless it is already known to exist.",
+  "When a user says Bash in a permission-test prompt, treat that as a request to execute a shell command, not as a requirement to start a literal bash.exe process.",
+  "On Windows, run simple commands directly or with PowerShell-compatible syntax. For example, use node -v instead of bash -lc \"node -v\".",
 ].join("\n");
 
 export async function executeCodex(
@@ -246,7 +249,7 @@ function getThreadOptions(options: ExecuteCodexOptions): ThreadOptions {
     workingDirectory: options.workDir,
     skipGitRepoCheck: options.config.skipGitRepoCheck,
     approvalPolicy: "never",
-    sandboxMode: "workspace-write",
+    sandboxMode: options.config.sandboxMode ?? "workspace-write",
     modelReasoningEffort: normalizeReasoningEffort(options.config.reasoningEffort),
     networkAccessEnabled: options.config.networkAccessEnabled,
   };
@@ -260,6 +263,7 @@ function getRuntimeSignature(options: ExecuteCodexOptions): string {
     reasoningEffort: normalizeReasoningEffort(options.config.reasoningEffort),
     skipGitRepoCheck: options.config.skipGitRepoCheck,
     networkAccessEnabled: options.config.networkAccessEnabled,
+    sandboxMode: options.config.sandboxMode ?? "workspace-write",
   });
 }
 

@@ -178,6 +178,7 @@ Windows 日志路径：
 /r claude
 /r codex
 /r restart
+/r sandbox [status|on|off]
 ```
 
 命令行为：
@@ -185,6 +186,7 @@ Windows 日志路径：
 - `/r cd <path>` 修改工作目录，并清空当前 Agent 上下文。
 - `/r clear` 清空当前聊天的 Agent 会话，同时保留工作目录。
 - `/r restart` 释放当前聊天的 Codex runtime；下一次 Codex 请求会启动新的 SDK runner，并恢复已保存的 thread。
+- `/r sandbox status|on|off` 查看或修改 Codex 沙箱模式。`on` 对应 `workspace-write`，`off` 对应 `danger-full-access`。
 - `/r claude` 和 `/r codex` 切换 Agent 后端。
 
 ## Codex
@@ -213,6 +215,7 @@ raven-ts config set codex.model gpt-5.3-codex
 raven-ts config set codex.reasoningEffort medium
 raven-ts config set codex.timeoutMs 300000
 raven-ts config set codex.networkAccessEnabled true
+raven-ts config set codex.sandboxMode workspace-write
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
 ```
 

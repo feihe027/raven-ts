@@ -77,6 +77,7 @@ export async function statusCommand(): Promise<void> {
   console.log(`  Codex binary: ${codexConfig.codexBin || "(SDK default)"}`);
   console.log(`  Codex reasoning: ${codexConfig.reasoningEffort}`);
   console.log(`  Codex timeout: ${codexConfig.timeoutMs}ms`);
+  console.log(`  Codex sandbox: ${codexConfig.sandboxMode ?? "workspace-write"}`);
   console.log();
 
   // Daemon status

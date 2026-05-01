@@ -182,6 +182,7 @@ Send commands in Feishu/Lark:
 /r claude
 /r codex
 /r restart
+/r sandbox [status|on|off]
 ```
 
 Command behavior:
@@ -190,6 +191,7 @@ Command behavior:
 - `/r cd <path>` changes the work directory and clears the current agent context.
 - `/r clear` clears the current chat's agent session while keeping the work directory.
 - `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new SDK runner and resumes the saved thread.
+- `/r sandbox status|on|off` shows or changes the Codex sandbox mode. `on` maps to `workspace-write`; `off` maps to `danger-full-access`.
 - `/r claude` and `/r codex` switch the backend.
 - `!your message` interrupts the current run and starts a fresh run with the new prompt.
 
@@ -219,6 +221,7 @@ raven-ts config set codex.model gpt-5.3-codex
 raven-ts config set codex.reasoningEffort medium
 raven-ts config set codex.timeoutMs 300000
 raven-ts config set codex.networkAccessEnabled true
+raven-ts config set codex.sandboxMode workspace-write
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
 ```
 

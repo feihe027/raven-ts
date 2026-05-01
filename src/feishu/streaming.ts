@@ -82,7 +82,7 @@ export class AgentStreamingReply {
     if (!this.messageId && this.disabled) {
       return false;
     }
-    return this.enqueueFlush(title, markdown, true);
+    return this.enqueueFlush("", formatFinalMarkdown(markdown, title), true);
   }
 
   async appendText(chunk: string, mode: StreamAppendMode = "block"): Promise<void> {
@@ -455,14 +455,25 @@ function buildAgentStreamCard(
         print_strategy: "fast",
       },
     },
-    header: {
-      title: { tag: "plain_text", content: title },
-      template: options.headerTemplate,
-    },
+    header: title
+      ? {
+          title: { tag: "plain_text", content: title },
+          template: options.headerTemplate,
+        }
+      : undefined,
     body: {
       elements,
     },
   };
+}
+
+function formatFinalMarkdown(markdown: string, status: string): string {
+  const trimmedMarkdown = markdown.trim();
+  const trimmedStatus = status.trim();
+  if (!trimmedStatus) {
+    return trimmedMarkdown;
+  }
+  return trimmedMarkdown ? `${trimmedStatus}\n\n${trimmedMarkdown}` : trimmedStatus;
 }
 
 function formatCardMarkdown(markdown: string, fallbackStatus: string): string {

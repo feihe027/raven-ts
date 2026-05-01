@@ -420,7 +420,6 @@ function buildPermissionCard(args: {
             escapeMarkdown(description),
             "",
             `Tool: \`${escapeMarkdown(args.toolName)}\``,
-            `Approval ID: \`${shortRequestId(args.requestId)}\``,
           ].join("\n"),
         },
         {
@@ -433,7 +432,7 @@ function buildPermissionCard(args: {
         ]),
         {
           tag: "markdown",
-          content: `<font color="grey">Only the original requester can approve. If the button shows an error, reply: \`/r allow ${shortRequestId(args.requestId)}\` or \`/r deny ${shortRequestId(args.requestId)}\`. This request auto-denies after 5 minutes.</font>`,
+          content: `<font color="grey">Only the original requester can approve. This request auto-denies after 5 minutes.</font>`,
         },
       ],
     },
@@ -542,8 +541,4 @@ function truncate(text: string, maxLength: number): string {
 
 function escapeMarkdown(text: string): string {
   return text.replace(/[*_`~[\]]/g, "\\$&");
-}
-
-function shortRequestId(requestId: string): string {
-  return requestId.slice(0, 8);
 }
