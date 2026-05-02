@@ -1,5 +1,6 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { createHash } from "crypto";
+import { deflateSync } from "zlib";
 import {
   closeSync,
   existsSync,
@@ -14,6 +15,7 @@ import {
   getAgentProvider,
   getCodexConfig,
   getFeishuConfig,
+  getImageConfig,
   getClaudeConfig,
   setAgentProvider,
   setClaudeConfig,
@@ -26,11 +28,17 @@ import {
   createFeishuWSClient,
   createEventDispatcher,
   isDebugEventsEnabled,
+  loadImageDataUris,
   parseMessageContent,
   replyToMessage,
   replyWithCard,
+  sendImageMessage,
+  uploadImage,
   MessageEvent,
 } from "./client.js";
+import type { AgentPrompt } from "../agent/prompt.js";
+import { generateOpenAIImage } from "../image/openai.js";
+import { captureDesktopScreenshot } from "../image/screenshot.js";
 import { ClaudeStreamingReply, CodexStreamingReply } from "./streaming.js";
 import {
   cancelPendingToolPermissions,
@@ -164,7 +172,7 @@ interface HandlerContext {
 type InterruptReason = "stop" | "bang_prefix";
 
 interface PendingClaudeRequest {
-  prompt: string;
+  prompt: AgentPrompt;
   event: MessageEvent;
   context: HandlerContext;
 }
@@ -212,6 +220,42 @@ function getChatBusyState(chatId: string): { busy: boolean; provider?: "claude" 
   return { busy: false };
 }
 
+function formatDedupContent(event: MessageEvent): string {
+  const imageKeys = event.imageKeys?.join("\n") ?? "";
+  return imageKeys ? `${event.content}\n${imageKeys}` : event.content;
+}
+
+async function buildAgentPrompt(
+  event: MessageEvent,
+  context: HandlerContext,
+  textOverride?: string
+): Promise<AgentPrompt> {
+  const imageDataUris = await loadImageDataUris(context.client, event);
+  event.imageDataUris = imageDataUris.length > 0 ? imageDataUris : undefined;
+  const hasImages = imageDataUris.length > 0;
+  const text = normalizeMessageTextForAgent(textOverride ?? event.content, hasImages);
+  return {
+    text,
+    ...(hasImages ? { imageDataUris } : {}),
+  };
+}
+
+function normalizeMessageTextForAgent(content: string, hasImages: boolean): string {
+  const trimmed = content.trim();
+  if (hasImages && (!trimmed || trimmed === "[Image]")) {
+    return "Please inspect the attached image.";
+  }
+  return trimmed;
+}
+
+function normalizeIncomingContent(content: string): string {
+  const normalized = content
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\u00A0/g, " ")
+    .trim();
+  return normalized.startsWith("／r") ? `/${normalized.slice(1)}` : normalized;
+}
+
 /**
  * Handle incoming Feishu message
  */
@@ -230,16 +274,22 @@ export async function handleFeishuMessage(
   }
 
   const { messageId, chatId, senderId, content, msgType } = messageEvent;
+  const imageCount = messageEvent.imageKeys?.length ?? 0;
 
   // Skip duplicate messages
-  const duplicateReason = getDuplicateReason(messageId, chatId, senderId, content);
+  const duplicateReason = getDuplicateReason(
+    messageId,
+    chatId,
+    senderId,
+    formatDedupContent(messageEvent)
+  );
   if (duplicateReason) {
     console.log(`[Skip pid=${process.pid}] Duplicate ${duplicateReason}: ${messageId}`);
     return;
   }
 
-  // Only handle plain text and rich text post messages.
-  if (msgType !== "text" && msgType !== "post") {
+  // Only handle plain text, rich text post, and image/screenshot messages.
+  if (msgType !== "text" && msgType !== "post" && msgType !== "image") {
     return;
   }
 
@@ -248,17 +298,26 @@ export async function handleFeishuMessage(
     return;
   }
 
-  console.log(`[Message pid=${process.pid} id=${messageId} chat=${chatId}] ${senderId}: ${content}`);
+  console.log(
+    `[Message pid=${process.pid} id=${messageId} chat=${chatId}] ${senderId}: ${content}${
+      imageCount > 0 ? ` (${imageCount} image${imageCount === 1 ? "" : "s"})` : ""
+    }`
+  );
 
-  const trimmedContent = content.trim();
-  if (!trimmedContent) {
+  const trimmedContent = normalizeIncomingContent(content);
+  if (!trimmedContent && imageCount === 0) {
     return;
   }
 
   try {
     const interruptPrompt = parseInterruptPrompt(trimmedContent);
     if (interruptPrompt) {
-      await handleAgentRequest(interruptPrompt, messageEvent, context, { interrupt: true });
+      await handleAgentRequest(
+        await buildAgentPrompt(messageEvent, context, interruptPrompt),
+        messageEvent,
+        context,
+        { interrupt: true }
+      );
       return;
     }
 
@@ -269,7 +328,7 @@ export async function handleFeishuMessage(
     }
 
     // Regular message - execute the configured agent SDK
-    await handleAgentRequest(trimmedContent, messageEvent, context);
+    await handleAgentRequest(await buildAgentPrompt(messageEvent, context), messageEvent, context);
   } catch (err) {
     console.error("[Message] Failed to handle Feishu message:", err);
     await replyUnexpectedHandlerError(messageEvent, context, err);
@@ -306,6 +365,9 @@ async function handleCommand(
 \`/r restart\` - Restart Codex runtime for this chat
 \`/r clear\` / \`/r reset\` - Clear agent session and restart Claude runtime
 \`/r status\` - Show session status
+\`/r image <prompt>\` - Generate an image and reply with it
+\`/r image-test\` - Send a tiny built-in image to verify Feishu image delivery
+\`/r screenshot\` - Capture the current desktop and send it as an image
 
 Just send any message without prefix to execute with the configured agent.
 Use \`!your message\` to interrupt the current run and execute a new prompt immediately.`,
@@ -425,6 +487,26 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
     case "allow":
     case "deny": {
       await handleToolPermissionCommand(command, args, event, context);
+      break;
+    }
+
+    case "image":
+    case "img": {
+      await handleImageCommand(args, event, context);
+      break;
+    }
+
+    case "image-test":
+    case "img-test":
+    case "imgtest": {
+      await handleImageTestCommand(event, context);
+      break;
+    }
+
+    case "screenshot":
+    case "ss":
+    case "capture": {
+      await handleScreenshotCommand(event, context);
       break;
     }
 
@@ -652,6 +734,156 @@ async function handleToolPermissionCommand(
   }
 }
 
+async function handleImageCommand(
+  args: string[],
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const prompt = args.slice(1).join(" ").trim();
+  if (!prompt) {
+    await replyToMessage(context.client, event.messageId, "Usage: /r image <prompt>");
+    return;
+  }
+
+  const config = getImageConfig();
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    `Generating image with ${config.model}...`
+  );
+
+  const startedAt = Date.now();
+  try {
+    const image = await generateOpenAIImage(prompt, config);
+    const imageKey = await uploadImage(context.client, image.bytes);
+    await sendImageMessage(context.client, event.chatId, imageKey);
+    console.log(
+      `[Image] Generated image with ${image.model} (${image.mimeType}, ${image.bytes.length} bytes) in ${formatDuration(
+        Date.now() - startedAt
+      )}`
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[Image] Failed to generate or send image:", err);
+    await replyWithCard(
+      context.client,
+      event.messageId,
+      `[ERROR] **Image generation failed**\n\n\`\`\`\n${truncateForFeishu(message, 3000)}\n\`\`\``,
+      "Image Failed"
+    );
+  }
+}
+
+async function handleImageTestCommand(
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  await replyToMessage(context.client, event.messageId, "Sending a built-in test image...");
+
+  try {
+    const imageKey = await uploadImage(context.client, getBuiltInTestPng());
+    await sendImageMessage(context.client, event.chatId, imageKey);
+    console.log("[Image] Sent built-in test image");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[Image] Failed to send built-in test image:", err);
+    await replyWithCard(
+      context.client,
+      event.messageId,
+      `[ERROR] **Image test failed**\n\n\`\`\`\n${truncateForFeishu(message, 3000)}\n\`\`\``,
+      "Image Test Failed"
+    );
+  }
+}
+
+async function handleScreenshotCommand(
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  await replyToMessage(context.client, event.messageId, "Capturing screenshot...");
+
+  const startedAt = Date.now();
+  try {
+    const screenshot = await captureDesktopScreenshot();
+    const imageKey = await uploadImage(context.client, screenshot.bytes);
+    await sendImageMessage(context.client, event.chatId, imageKey);
+    const dimensions =
+      screenshot.width && screenshot.height ? ` ${screenshot.width}x${screenshot.height}` : "";
+    console.log(
+      `[Image] Sent screenshot${dimensions} (${screenshot.bytes.length} bytes) in ${formatDuration(
+        Date.now() - startedAt
+      )}`
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[Image] Failed to capture or send screenshot:", err);
+    await replyWithCard(
+      context.client,
+      event.messageId,
+      `[ERROR] **Screenshot failed**\n\n\`\`\`\n${truncateForFeishu(message, 3000)}\n\`\`\``,
+      "Screenshot Failed"
+    );
+  }
+}
+
+function getBuiltInTestPng(): Buffer {
+  const width = 96;
+  const height = 64;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      const offset = row + 1 + x * 3;
+      const inTopLeft = x < width / 2 && y < height / 2;
+      const inBottomRight = x >= width / 2 && y >= height / 2;
+      raw[offset] = inTopLeft ? 236 : 40;
+      raw[offset + 1] = inBottomRight ? 180 : 90;
+      raw[offset + 2] = inTopLeft ? 55 : 220;
+    }
+  }
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", buildPngHeader(width, height)),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function buildPngHeader(width: number, height: number): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+  return header;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 0);
+  return Buffer.concat([length, typeBytes, data, crc]);
+}
+
+function crc32(buffer: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 async function switchAgent(
   requestedProvider: "claude" | "codex",
   event: MessageEvent,
@@ -680,7 +912,7 @@ async function switchAgent(
  * Handle configured agent SDK execution request
  */
 async function handleAgentRequest(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext,
   options?: { interrupt?: boolean }
@@ -705,7 +937,7 @@ async function handleAgentRequest(
 }
 
 async function executeClaudeRequest(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext,
   interruptSignal?: AbortSignal
@@ -783,7 +1015,7 @@ async function executeClaudeRequest(
 }
 
 async function handleCodexRequest(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext
 ): Promise<void> {
@@ -873,7 +1105,7 @@ async function handleCodexRequest(
 }
 
 async function enqueueClaudeRequest(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext
 ): Promise<void> {
@@ -949,7 +1181,7 @@ async function processClaudeQueue(
 }
 
 async function interruptClaudeAndRun(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext
 ): Promise<void> {
@@ -983,7 +1215,7 @@ async function interruptClaudeAndRun(
 }
 
 async function interruptCodexAndRun(
-  prompt: string,
+  prompt: AgentPrompt,
   event: MessageEvent,
   context: HandlerContext
 ): Promise<void> {

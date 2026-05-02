@@ -5,14 +5,17 @@ import {
   getFeishuConfig,
   getClaudeConfig,
   getConfigPath,
+  getImageConfig,
   setAgentProvider,
   setCodexConfig,
   setFeishuConfig,
+  setImageConfig,
   setClaudeConfig,
   type AgentProvider,
   type ClaudeConfig,
   type CodexConfig,
   type FeishuConfig,
+  type ImageConfig,
 } from "../config.js";
 
 export async function configCommand(action: string, key?: string, value?: string): Promise<void> {
@@ -44,6 +47,11 @@ export async function configCommand(action: string, key?: string, value?: string
         console.log("  codex.skipGitRepoCheck");
         console.log("  codex.networkAccessEnabled");
         console.log("  codex.sandboxMode");
+        console.log("  image.model");
+        console.log("  image.size");
+        console.log("  image.quality");
+        console.log("  image.outputFormat");
+        console.log("  image.timeoutMs");
         return;
       }
       await setConfigValue(key, value);
@@ -67,6 +75,7 @@ function showConfig(): void {
   const feishu = getFeishuConfig();
   const claude = getClaudeConfig();
   const codex = getCodexConfig();
+  const image = getImageConfig();
 
   console.log(chalk.bold("Agent:"));
   console.log(`  provider: ${getAgentProvider()}`);
@@ -100,6 +109,14 @@ function showConfig(): void {
   console.log(`  networkAccessEnabled: ${codex.networkAccessEnabled}`);
   console.log(`  sandboxMode: ${codex.sandboxMode ?? "workspace-write"}`);
   console.log();
+
+  console.log(chalk.bold("Image:"));
+  console.log(`  model: ${image.model}`);
+  console.log(`  size: ${image.size}`);
+  console.log(`  quality: ${image.quality ?? "(provider default)"}`);
+  console.log(`  outputFormat: ${image.outputFormat}`);
+  console.log(`  timeoutMs: ${image.timeoutMs}`);
+  console.log();
 }
 
 async function setConfigValue(key: string, value: string): Promise<void> {
@@ -113,6 +130,8 @@ async function setConfigValue(key: string, value: string): Promise<void> {
     setClaudeValue(key, subkey, value);
   } else if (section === "codex") {
     setCodexValue(key, subkey, value);
+  } else if (section === "image") {
+    setImageValue(key, subkey, value);
   } else {
     console.log(chalk.red(`Unknown section: ${section}`));
   }
@@ -251,6 +270,45 @@ function setCodexValue(key: string, subkey: string, value: string): void {
   }
 
   setCodexConfig(patch);
+  console.log(chalk.green(`Set ${key}`));
+}
+
+function setImageValue(key: string, subkey: string, value: string): void {
+  const patch: Partial<ImageConfig> = {};
+
+  switch (subkey) {
+    case "model":
+      patch.model = value;
+      break;
+    case "size":
+      patch.size = value;
+      break;
+    case "quality":
+      patch.quality = ["", "default", "none", "null"].includes(value.toLowerCase())
+        ? undefined
+        : value;
+      break;
+    case "outputFormat": {
+      const normalized = value.toLowerCase();
+      if (normalized !== "png" && normalized !== "jpeg" && normalized !== "webp") {
+        console.log(chalk.red("image.outputFormat must be png, jpeg, or webp"));
+        return;
+      }
+      patch.outputFormat = normalized;
+      break;
+    }
+    case "timeoutMs": {
+      const parsed = parsePositiveInteger(value, "image.timeoutMs");
+      if (parsed === null) return;
+      patch.timeoutMs = parsed;
+      break;
+    }
+    default:
+      console.log(chalk.red(`Unknown key: image.${subkey}`));
+      return;
+  }
+
+  setImageConfig(patch);
   console.log(chalk.green(`Set ${key}`));
 }
 

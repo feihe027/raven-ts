@@ -139,6 +139,7 @@ Add these API permissions as **application permissions**:
 | `im:message.group_at_msg:readonly` | Read group messages that @mention the bot | Group chat usage where users @ the bot |
 | `im:message.group_msg` | Read all messages in groups where the bot is present | Optional group mode if you want the bot to receive non-@ group messages |
 | `im:message:readonly` | Read single-chat and group messages | Some tenants expose this as a broader or legacy alternative to the more specific read scopes |
+| `im:resource` | Get and upload image or file resources | Downloading user-sent image/screenshot resources for Claude and Codex image input |
 | `im:message:update` | Update messages sent by the app | Updating existing interactive cards, including final streaming-card refreshes and permission-card status updates |
 | `cardkit:card:read` | Read CardKit card instances | Converting a reply message id to a CardKit card id for native streaming updates |
 | `cardkit:card:write` | Update CardKit cards and elements | Native streaming updates for the live response card |
@@ -149,10 +150,13 @@ im:message.p2p_msg:readonly
 im:message.group_at_msg:readonly
 im:message.group_msg
 im:message:readonly
+im:resource
 im:message:update
 cardkit:card:read
 cardkit:card:write
 ```
+
+Image and screenshot messages are supported for both Claude and Codex. For this to work, the app must be able to receive the `image` message type and download message resources with `im:resource`; in group chats the bot also needs the relevant group-message receive permission for the messages you expect it to see.
 
 Event subscriptions:
 
@@ -214,6 +218,9 @@ Send commands in Feishu/Lark:
 /r restart
 /r auth [status|safe|ask|auto|accept-edits|deny|bypass]
 /r sandbox [status|on|off]
+/r image <prompt>
+/r image-test
+/r screenshot
 ```
 
 Command behavior:
@@ -224,8 +231,31 @@ Command behavior:
 - `/r restart` disposes the current chat's Codex runtime; the next Codex request starts a new SDK runner and resumes the saved thread.
 - `/r auth status|safe|ask|auto|accept-edits|deny|bypass` shows or changes the Claude authorization mode. `on` maps to `auto`; `off` maps to `ask`.
 - `/r sandbox status|on|off` shows or changes the Codex sandbox mode. `on` maps to `workspace-write`; `off` maps to `danger-full-access`.
+- `/r image <prompt>` generates an image with the OpenAI Image API, uploads it to Feishu/Lark, and replies with an image message.
+- `/r image-test` sends a built-in PNG through Feishu/Lark upload and image-message APIs to verify bot image delivery.
+- `/r screenshot` captures the current Windows desktop and sends it as an image message.
 - `/r claude` and `/r codex` switch the backend.
 - `!your message` interrupts the current run and starts a fresh run with the new prompt.
+
+## Image Generation
+
+`/r image <prompt>` uses `OPENAI_API_KEY` from the raven-ts environment and the OpenAI Image API. The default image model is:
+
+```text
+gpt-image-1.5
+```
+
+Config examples:
+
+```sh
+raven-ts config set image.model gpt-image-1.5
+raven-ts config set image.size 1024x1024
+raven-ts config set image.quality medium
+raven-ts config set image.outputFormat png
+raven-ts config set image.timeoutMs 180000
+```
+
+The Feishu/Lark app needs `im:resource` to upload the generated image and `im:message:send_as_bot` to send it.
 
 ## Codex
 
@@ -357,6 +387,6 @@ raven-ts start
 
 ## Current Limits
 
-- Feishu/Lark image and screenshot messages are not yet passed to Codex image input.
+- File, audio, and video attachments are not yet passed to agent input.
 - Official Codex SDK does not expose mid-turn instruction injection; use `!prompt` to interrupt and replace an active turn.
 - The Codex SDK window-hiding patch is applied through `postinstall`, because the upstream SDK does not currently set `windowsHide`.

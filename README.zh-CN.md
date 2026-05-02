@@ -136,6 +136,7 @@ https://open.feishu.cn/document/develop-a-card-interactive-bot/faqs
 | `im:message.group_at_msg:readonly` | 获取用户在群组中 @ 机器人的消息 | 群聊中通过 @ 机器人使用 |
 | `im:message.group_msg` | 获取机器人所在群组中的所有消息 | 可选；需要接收非 @ 群消息时启用 |
 | `im:message:readonly` | 获取单聊、群组消息 | 部分租户会把它作为更宽泛或历史版本的消息读取权限 |
+| `im:resource` | 获取与上传图片或文件资源 | 下载用户发送的图片/截图资源，并传给 Claude 和 Codex 的图片输入 |
 | `im:message:update` | 更新应用发送的消息 | 更新已有交互卡片，包括流式回复最终刷新和授权卡片状态更新 |
 | `cardkit:card:read` | 读取 CardKit 卡片实例 | 将回复消息 id 转换为 CardKit card id，用于原生流式更新 |
 | `cardkit:card:write` | 更新 CardKit 卡片和卡片元素 | 对实时回复卡片做原生流式更新 |
@@ -146,10 +147,13 @@ im:message.p2p_msg:readonly
 im:message.group_at_msg:readonly
 im:message.group_msg
 im:message:readonly
+im:resource
 im:message:update
 cardkit:card:read
 cardkit:card:write
 ```
+
+图片和截图消息现在会传给 Claude 和 Codex。要启用这条链路，应用需要能接收 `image` 消息类型，并通过 `im:resource` 下载消息资源；在群聊中，还需要按预期接收范围配置对应的群消息读取权限。
 
 事件订阅：
 
@@ -210,6 +214,9 @@ Windows 日志路径：
 /r restart
 /r auth [status|safe|ask|auto|accept-edits|deny|bypass]
 /r sandbox [status|on|off]
+/r image <提示词>
+/r image-test
+/r screenshot
 ```
 
 命令行为：
@@ -219,7 +226,30 @@ Windows 日志路径：
 - `/r restart` 释放当前聊天的 Codex runtime；下一次 Codex 请求会启动新的 SDK runner，并恢复已保存的 thread。
 - `/r auth status|safe|ask|auto|accept-edits|deny|bypass` 查看或修改 Claude 授权模式。`on` 对应 `auto`，`off` 对应 `ask`。
 - `/r sandbox status|on|off` 查看或修改 Codex 沙箱模式。`on` 对应 `workspace-write`，`off` 对应 `danger-full-access`。
+- `/r image <提示词>` 调用 OpenAI Image API 生成图片，上传到飞书/Lark，并以图片消息回复。
+- `/r image-test` 通过飞书/Lark 上传和图片消息接口发送内置 PNG，用于验证机器人发图链路。
+- `/r screenshot` 截取当前 Windows 桌面，并以图片消息发回飞书/Lark。
 - `/r claude` 和 `/r codex` 切换 Agent 后端。
+
+## 图片生成
+
+`/r image <提示词>` 使用 raven-ts 运行环境中的 `OPENAI_API_KEY`，并调用 OpenAI Image API。默认图片模型：
+
+```text
+gpt-image-1.5
+```
+
+配置示例：
+
+```sh
+raven-ts config set image.model gpt-image-1.5
+raven-ts config set image.size 1024x1024
+raven-ts config set image.quality medium
+raven-ts config set image.outputFormat png
+raven-ts config set image.timeoutMs 180000
+```
+
+飞书/Lark 应用需要 `im:resource` 权限上传生成后的图片，并需要 `im:message:send_as_bot` 权限发送图片消息。
 
 ## Codex
 
@@ -350,6 +380,6 @@ raven-ts start
 
 ## 当前限制
 
-- 飞书/Lark 图片和截图消息暂未传递给 Codex image input。
+- 文件、音频、视频附件暂未传递给 agent input。
 - 官方 Codex SDK 不提供 mid-turn 指令注入；需要使用 `!prompt` 中断并替换当前 turn。
 - 由于上游 Codex SDK 当前没有设置 `windowsHide`，窗口隐藏逻辑通过 `postinstall` patch 应用。

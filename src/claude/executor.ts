@@ -14,6 +14,11 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeAuthMode } from "../config.js";
+import {
+  normalizeAgentPrompt,
+  parseImageDataUri,
+  type AgentPrompt,
+} from "../agent/prompt.js";
 
 const require = createRequire(import.meta.url);
 
@@ -108,7 +113,7 @@ const READ_ONLY_CLAUDE_TOOLS = new Set([
  * Execute a prompt through the Claude Agent SDK.
  */
 export async function executeClaude(
-  prompt: string,
+  prompt: string | AgentPrompt,
   options: ExecuteOptions
 ): Promise<ExecuteResult> {
   const startTime = Date.now();
@@ -654,12 +659,32 @@ function getClaudeRuntimeKey(options: ExecuteOptions): string {
   return options.conversationId ?? `${options.workDir}:${options.resumeSessionId ?? "new"}`;
 }
 
-function createUserMessage(prompt: string): SDKUserMessage {
+function createUserMessage(input: string | AgentPrompt): SDKUserMessage {
+  const prompt = normalizeAgentPrompt(input);
+  const content: Array<Record<string, unknown>> = [];
+
+  for (const dataUri of prompt.imageDataUris ?? []) {
+    const parsed = parseImageDataUri(dataUri);
+    if (!parsed) {
+      continue;
+    }
+    content.push({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: parsed.mime,
+        data: parsed.data,
+      },
+    });
+  }
+
+  content.push({ type: "text", text: prompt.text });
+
   return {
     type: "user",
     message: {
       role: "user",
-      content: [{ type: "text", text: prompt }],
+      content: content as unknown as SDKUserMessage["message"]["content"],
     },
     parent_tool_use_id: null,
   };

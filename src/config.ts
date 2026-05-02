@@ -30,10 +30,19 @@ export interface CodexConfig {
   sandboxMode: CodexSandboxMode;
 }
 
+export interface ImageConfig {
+  model: string;
+  size: string;
+  quality?: string;
+  outputFormat: "png" | "jpeg" | "webp";
+  timeoutMs: number;
+}
+
 export interface AppConfig {
   feishu: FeishuConfig | null;
   claude: ClaudeConfig;
   codex: CodexConfig;
+  image: ImageConfig;
   agent: {
     provider: AgentProvider;
   };
@@ -54,6 +63,13 @@ const defaults: AppConfig = {
     skipGitRepoCheck: true,
     networkAccessEnabled: true,
     sandboxMode: "workspace-write",
+  },
+  image: {
+    model: "gpt-image-1.5",
+    size: "1024x1024",
+    quality: "medium",
+    outputFormat: "png",
+    timeoutMs: 180000,
   },
   agent: {
     provider: "claude",
@@ -85,6 +101,7 @@ function migrateLegacyConfig(): void {
     config.set("feishu", legacyFeishu);
     config.set("claude", legacyConfig.get("claude"));
     config.set("codex", legacyConfig.get("codex"));
+    config.set("image", legacyConfig.get("image"));
     config.set("agent", legacyConfig.get("agent"));
     return;
   }
@@ -116,6 +133,14 @@ export function getCodexConfig(): CodexConfig {
 
 export function setCodexConfig(cfg: Partial<CodexConfig>): void {
   config.set("codex", { ...config.get("codex"), ...cfg });
+}
+
+export function getImageConfig(): ImageConfig {
+  return config.get("image");
+}
+
+export function setImageConfig(cfg: Partial<ImageConfig>): void {
+  config.set("image", { ...config.get("image"), ...cfg });
 }
 
 export function getAgentProvider(): AgentProvider {

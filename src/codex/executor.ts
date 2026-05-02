@@ -5,8 +5,18 @@ import {
   type ThreadItem,
   type ThreadOptions,
   type Usage,
+  type UserInput,
 } from "@openai/codex-sdk";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import type { CodexConfig } from "../config.js";
+import {
+  getImageExtension,
+  normalizeAgentPrompt,
+  parseImageDataUri,
+  type AgentPrompt,
+} from "../agent/prompt.js";
 
 export interface ExecuteCodexResult {
   success: boolean;
@@ -90,7 +100,7 @@ const BASE_INSTRUCTIONS = [
 ].join("\n");
 
 export async function executeCodex(
-  prompt: string,
+  prompt: string | AgentPrompt,
   options: ExecuteCodexOptions
 ): Promise<ExecuteCodexResult> {
   const existingRun = activeRuns.get(options.conversationId);
@@ -131,9 +141,11 @@ export async function executeCodex(
       timedOut = true;
       abortController.abort();
     }, options.config.timeoutMs);
+    let codexInput: BuiltCodexInput | undefined;
 
     try {
-      const streamed = await runtime.thread.runStreamed(buildPrompt(prompt), {
+      codexInput = await buildPrompt(prompt);
+      const streamed = await runtime.thread.runStreamed(codexInput.input, {
         signal: abortController.signal,
       });
 
@@ -177,6 +189,7 @@ export async function executeCodex(
       }
     } finally {
       clearTimeout(timeoutId);
+      await codexInput?.cleanup();
     }
 
     codexThreadId = runtime.thread.id ?? runtime.threadId ?? codexThreadId;
@@ -346,8 +359,50 @@ function normalizeReasoningEffort(effort: CodexConfig["reasoningEffort"]): Model
   return effort;
 }
 
-function buildPrompt(prompt: string): string {
-  return `${BASE_INSTRUCTIONS}\n\nUser request:\n${prompt}`;
+interface BuiltCodexInput {
+  input: string | UserInput[];
+  cleanup: () => Promise<void>;
+}
+
+async function buildPrompt(input: string | AgentPrompt): Promise<BuiltCodexInput> {
+  const prompt = normalizeAgentPrompt(input);
+  const text = `${BASE_INSTRUCTIONS}\n\nUser request:\n${prompt.text}`;
+  if (!prompt.imageDataUris?.length) {
+    return {
+      input: text,
+      cleanup: async () => {},
+    };
+  }
+
+  let tempDir: string | undefined;
+  try {
+    tempDir = await mkdtemp(join(tmpdir(), "raven-ts-codex-images-"));
+    const items: UserInput[] = [{ type: "text", text }];
+
+    for (const [index, dataUri] of prompt.imageDataUris.entries()) {
+      const parsed = parseImageDataUri(dataUri);
+      if (!parsed) {
+        continue;
+      }
+      const path = join(tempDir, `image-${index + 1}.${getImageExtension(parsed.mime)}`);
+      await writeFile(path, Buffer.from(parsed.data, "base64"));
+      items.push({ type: "local_image", path });
+    }
+
+    return {
+      input: items.length > 1 ? items : text,
+      cleanup: async () => {
+        if (tempDir) {
+          await rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    };
+  } catch (err) {
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+    throw err;
+  }
 }
 
 function getTextDelta(item: ThreadItem, textCache: Map<string, string>): string {

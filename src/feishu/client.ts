@@ -1,5 +1,8 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
+import { Readable } from "stream";
 import { FeishuConfig } from "../config.js";
+import { detectImageMime } from "./image-mime.js";
+import { parsePost } from "./post-parser.js";
 
 export type { FeishuConfig } from "../config.js";
 
@@ -11,6 +14,8 @@ export interface MessageEvent {
   content: string;
   msgType: string;
   createTime: number;
+  imageKeys?: string[];
+  imageDataUris?: string[];
 }
 
 export interface MessageSendResult {
@@ -23,6 +28,8 @@ export interface FeishuCard {
   header?: Record<string, unknown>;
   body?: Record<string, unknown>;
 }
+
+const FEISHU_MAX_UPLOAD_IMAGE_BYTES = 10 * 1024 * 1024;
 
 export function resolveDomain(domain: "feishu" | "lark"): Lark.Domain {
   return domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu;
@@ -97,6 +104,7 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
         message_id?: string;
         chat_id?: string;
         msg_type?: string;
+        message_type?: string;
         content?: string;
         create_time?: string;
         mentions?: Array<{
@@ -119,7 +127,8 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
 
     // Parse content based on message type
     let content = message.content ?? "";
-    const msgType = message.msg_type ?? "text";
+    let imageKeys: string[] | undefined;
+    const msgType = message.msg_type ?? message.message_type ?? "text";
 
     if (msgType === "text" && content) {
       try {
@@ -128,12 +137,21 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
       } catch {
         // Keep raw content
       }
+    } else if (msgType === "image" && content) {
+      try {
+        const parsed = JSON.parse(content) as { image_key?: unknown };
+        if (typeof parsed.image_key === "string" && parsed.image_key) {
+          imageKeys = [parsed.image_key];
+        }
+        content = "[Image]";
+      } catch {
+        // Keep raw content
+      }
     } else if (msgType === "post" && content) {
       try {
-        // Extract text from rich text post
-        const parsed = JSON.parse(content);
-        const textContent = extractPostText(parsed);
-        if (textContent) content = textContent;
+        const parsed = parsePost(content);
+        content = parsed.text;
+        imageKeys = parsed.imageKeys.length > 0 ? parsed.imageKeys : undefined;
       } catch {
         // Keep raw content
       }
@@ -147,6 +165,7 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
       content,
       msgType,
       createTime: message.create_time ? parseInt(message.create_time, 10) : Date.now(),
+      imageKeys,
     };
   } catch (err) {
     console.error("Failed to parse Feishu message event:", err);
@@ -154,25 +173,65 @@ export function parseMessageContent(event: unknown): MessageEvent | null {
   }
 }
 
-/**
- * Extract text content from Feishu post (rich text) message
- */
-function extractPostText(post: {
-  zh_cn?: { content?: Array<Array<{ tag?: string; text?: string }>> };
-  en_us?: { content?: Array<Array<{ tag?: string; text?: string }>> };
-}): string {
-  const content = post.zh_cn?.content ?? post.en_us?.content ?? [];
-  const lines: string[] = [];
-
-  for (const paragraph of content) {
-    const text = paragraph
-      .filter((el) => el.tag === "text" || el.tag === "md")
-      .map((el) => el.text ?? "")
-      .join("");
-    if (text) lines.push(text);
+export async function loadImageDataUris(
+  client: Lark.Client,
+  message: MessageEvent
+): Promise<string[]> {
+  if (!message.imageKeys?.length) {
+    return [];
   }
 
-  return lines.join("\n");
+  const buffers = await Promise.all(
+    message.imageKeys.map((imageKey) => downloadImage(client, message.messageId, imageKey))
+  );
+  return buffers.map((buffer) => `data:${detectImageMime(buffer)};base64,${buffer.toString("base64")}`);
+}
+
+export async function downloadImage(
+  client: Lark.Client,
+  messageId: string,
+  imageKey: string
+): Promise<Buffer> {
+  const response = await client.im.v1.messageResource.get({
+    path: { message_id: messageId, file_key: imageKey },
+    params: { type: "image" },
+  });
+  const data =
+    response && typeof response === "object" && "data" in response
+      ? (response as { data?: unknown }).data
+      : response;
+
+  if (Buffer.isBuffer(data)) {
+    return data;
+  }
+  if (data instanceof Uint8Array) {
+    return Buffer.from(data);
+  }
+  if (data instanceof Readable) {
+    return streamToBuffer(data);
+  }
+  if (
+    data &&
+    typeof data === "object" &&
+    "getReadableStream" in data &&
+    typeof (data as { getReadableStream?: unknown }).getReadableStream === "function"
+  ) {
+    return streamToBuffer((data as { getReadableStream: () => Readable }).getReadableStream());
+  }
+
+  throw new Error(
+    `downloadImage: unexpected response type ${
+      (data as { constructor?: { name?: string } } | null)?.constructor?.name ?? typeof data
+    }`
+  );
+}
+
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -193,6 +252,23 @@ export async function sendTextMessage(
   });
 }
 
+export async function sendImageMessage(
+  client: Lark.Client,
+  chatId: string,
+  imageKey: string
+): Promise<MessageSendResult> {
+  const response = await client.im.message.create({
+    params: { receive_id_type: "chat_id" },
+    data: {
+      receive_id: chatId,
+      content: JSON.stringify({ image_key: imageKey }),
+      msg_type: "image",
+    },
+  });
+
+  return { messageId: getResponseMessageId(response) };
+}
+
 /**
  * Reply to a message
  */
@@ -210,6 +286,46 @@ export async function replyToMessage(
   });
 
   return { messageId: getResponseMessageId(response) };
+}
+
+export async function replyWithImage(
+  client: Lark.Client,
+  messageId: string,
+  imageKey: string
+): Promise<MessageSendResult> {
+  const response = await client.im.message.reply({
+    path: { message_id: messageId },
+    data: {
+      content: JSON.stringify({ image_key: imageKey }),
+      msg_type: "image",
+    },
+  });
+
+  return { messageId: getResponseMessageId(response) };
+}
+
+export async function uploadImage(client: Lark.Client, image: Buffer): Promise<string> {
+  if (image.length === 0) {
+    throw new Error("Cannot upload an empty image to Feishu");
+  }
+  if (image.length > FEISHU_MAX_UPLOAD_IMAGE_BYTES) {
+    throw new Error(
+      `Feishu image upload limit is 10MB; generated image is ${formatBytes(image.length)}`
+    );
+  }
+
+  const response = await client.im.v1.image.create({
+    data: {
+      image_type: "message",
+      image,
+    },
+  });
+
+  const imageKey = getResponseImageKey(response);
+  if (!imageKey) {
+    throw new Error("Feishu image upload returned no image_key");
+  }
+  return imageKey;
 }
 
 /**
@@ -365,6 +481,21 @@ function getResponseCardId(response: unknown): string | undefined {
   return typeof cardId === "string" ? cardId : undefined;
 }
 
+function getResponseImageKey(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") {
+    return undefined;
+  }
+
+  const topLevel = (response as { image_key?: unknown }).image_key;
+  if (typeof topLevel === "string") {
+    return topLevel;
+  }
+
+  const data = getResponseData(response);
+  const imageKey = data?.image_key;
+  return typeof imageKey === "string" ? imageKey : undefined;
+}
+
 function getResponseData(response: unknown): Record<string, unknown> | undefined {
   if (!response || typeof response !== "object") {
     return undefined;
@@ -386,4 +517,8 @@ function assertFeishuSuccess(response: unknown, action: string): void {
 
   const msg = (response as { msg?: unknown }).msg;
   throw new Error(`Failed to ${action}: code=${code} msg=${typeof msg === "string" ? msg : ""}`);
+}
+
+function formatBytes(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }

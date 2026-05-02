@@ -6,6 +6,7 @@ import {
   getFeishuConfig,
   getClaudeConfig,
   getConfigPath,
+  getImageConfig,
 } from "../config.js";
 import { getDaemonStatus } from "../daemon/service.js";
 import { checkClaudeSdkAvailable, getAnthropicEnvVarNames } from "../claude/executor.js";
@@ -79,6 +80,12 @@ export async function statusCommand(): Promise<void> {
   console.log(`  Codex reasoning: ${codexConfig.reasoningEffort}`);
   console.log(`  Codex timeout: ${codexConfig.timeoutMs}ms`);
   console.log(`  Codex sandbox: ${codexConfig.sandboxMode ?? "workspace-write"}`);
+  const imageConfig = getImageConfig();
+  console.log(`  Image model: ${imageConfig.model}`);
+  console.log(`  Image size: ${imageConfig.size}`);
+  console.log(`  Image quality: ${imageConfig.quality ?? "(provider default)"}`);
+  console.log(`  Image output: ${imageConfig.outputFormat}`);
+  console.log(`  Image timeout: ${imageConfig.timeoutMs}ms`);
   console.log();
 
   // Daemon status
