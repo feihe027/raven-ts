@@ -328,7 +328,7 @@ gpt-5.3-codex
 raven-ts config set agent.provider codex
 raven-ts config set codex.model gpt-5.3-codex
 raven-ts config set codex.reasoningEffort medium
-raven-ts config set codex.timeoutMs 300000
+raven-ts config set codex.timeoutMs 6000000
 raven-ts config set codex.networkAccessEnabled true
 raven-ts config set codex.sandboxMode workspace-write
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
@@ -352,7 +352,7 @@ raven-ts config set agent.provider claude
 raven-ts config set claude.defaultWorkDir C:\repo\project
 raven-ts config set claude.defaultWorkDir ~/repo/project
 raven-ts config set claude.maxTurns 20
-raven-ts config set claude.timeoutMs 300000
+raven-ts config set claude.timeoutMs 6000000
 raven-ts config set claude.authMode safe
 ```
 
@@ -371,7 +371,7 @@ Claude 授权模式：
 
 `raven-ts start` 会运行后台 Node daemon：
 
-- Windows：后台 Node 进程，PID 文件位于 `%LOCALAPPDATA%\raven-ts`。
+- Windows：后台 Node 进程，PID 文件位于 `%LOCALAPPDATA%\raven-ts`，并在当前用户登录时自动启动，所以重启后登录即可自动拉起。
 - macOS：使用 `~/Library/LaunchAgents` 下的 LaunchAgent。
 - Linux：使用 `~/.config/systemd/user` 下的 user systemd service。
 

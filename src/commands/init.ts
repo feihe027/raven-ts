@@ -3,6 +3,7 @@ import ora from "ora";
 import { homedir } from "os";
 import * as readline from "readline";
 import {
+  DEFAULT_AGENT_TIMEOUT_MS,
   setFeishuConfig,
   getFeishuConfig,
   setClaudeConfig,
@@ -138,7 +139,11 @@ export async function initCommand(): Promise<void> {
     const defaultWorkDir = await prompt(rl, "Default working directory for Claude Agent SDK", homedir());
 
     const maxTurnsAnswer = await prompt(rl, "Claude SDK max turns", "20");
-    const timeoutAnswer = await prompt(rl, "Claude SDK timeout in milliseconds", "300000");
+    const timeoutAnswer = await prompt(
+      rl,
+      "Default agent timeout in milliseconds",
+      String(DEFAULT_AGENT_TIMEOUT_MS)
+    );
     const codexBin = await prompt(rl, "Codex binary path (optional)", "");
 
     // Start daemon
@@ -153,14 +158,17 @@ export async function initCommand(): Promise<void> {
       domain: domain as "feishu" | "lark",
     };
 
+    const timeoutMs = parsePositiveInteger(timeoutAnswer, DEFAULT_AGENT_TIMEOUT_MS);
+
     setFeishuConfig(feishuConfig);
     setClaudeConfig({
       defaultWorkDir,
       maxTurns: parsePositiveInteger(maxTurnsAnswer, 20),
-      timeoutMs: parsePositiveInteger(timeoutAnswer, 300000),
+      timeoutMs,
     });
     setCodexConfig({
       codexBin: codexBin || undefined,
+      timeoutMs,
     });
     setAgentProvider(agentProvider);
 

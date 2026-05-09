@@ -94,18 +94,20 @@ export interface AppConfig {
   };
 }
 
+export const DEFAULT_AGENT_TIMEOUT_MS = 6000000;
+
 const defaults: AppConfig = {
   feishu: null,
   claude: {
     defaultWorkDir: homedir(),
     maxTurns: 20,
-    timeoutMs: 300000,
+    timeoutMs: DEFAULT_AGENT_TIMEOUT_MS,
     authMode: "safe",
   },
   codex: {
     model: "gpt-5.3-codex",
     reasoningEffort: "medium",
-    timeoutMs: 300000,
+    timeoutMs: DEFAULT_AGENT_TIMEOUT_MS,
     skipGitRepoCheck: true,
     networkAccessEnabled: true,
     sandboxMode: "workspace-write",

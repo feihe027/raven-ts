@@ -23,6 +23,8 @@ const isWindows = platform() === "win32";
 
 const LAUNCH_AGENT_NAME = "com.raven-ts";
 const SYSTEMD_SERVICE_NAME = "raven-ts";
+const WINDOWS_RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const WINDOWS_RUN_VALUE_NAME = "raven-ts";
 
 function getLaunchAgentPath(): string {
   const dir = join(homedir(), "Library", "LaunchAgents");
@@ -50,6 +52,15 @@ function getDaemonScriptPath(): string {
   return join(__dirname, "..", "daemon.js");
 }
 
+function getCliScriptPath(): string {
+  return join(__dirname, "..", "cli.js");
+}
+
+function getPowerShellPath(): string {
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  return join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
 function getServicePathValue(): string {
   return `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(homedir(), ".local", "bin")}`;
 }
@@ -65,6 +76,63 @@ function escapeXml(value: string): string {
 
 function quoteSystemdArg(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function escapePowerShellSingleQuoted(value: string): string {
+  return value.replace(/'/g, "''");
+}
+
+function getWindowsAutoStartCommand(): string {
+  return `"${getPowerShellPath()}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& '${escapePowerShellSingleQuoted(
+    getNodePath()
+  )}' '${escapePowerShellSingleQuoted(getCliScriptPath())}' start"`;
+}
+
+async function ensureWindowsAutoStartRegistration(): Promise<void> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'",
+    `$name = '${escapePowerShellSingleQuoted(WINDOWS_RUN_VALUE_NAME)}'`,
+    `$value = '${escapePowerShellSingleQuoted(getWindowsAutoStartCommand())}'`,
+    "New-Item -Path $key -Force | Out-Null",
+    "Set-ItemProperty -Path $key -Name $name -Value $value -Type String",
+  ].join("\n");
+  await runHiddenPowerShell(script);
+}
+
+async function removeWindowsAutoStartRegistration(): Promise<void> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'",
+    `$name = '${escapePowerShellSingleQuoted(WINDOWS_RUN_VALUE_NAME)}'`,
+    "if (Test-Path -LiteralPath $key) {",
+    "  Remove-ItemProperty -Path $key -Name $name -ErrorAction SilentlyContinue",
+    "}",
+  ].join("\n");
+  try {
+    await runHiddenPowerShell(script);
+  } catch {
+    // Ignore missing Run entry.
+  }
+}
+
+async function runHiddenPowerShell(script: string): Promise<void> {
+  const { execFileSync } = await import("child_process");
+  execFileSync(
+    getPowerShellPath(),
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    {
+      stdio: "ignore",
+      windowsHide: true,
+    }
+  );
 }
 
 /**
@@ -182,15 +250,18 @@ export async function installDaemon(): Promise<{ success: boolean; message: stri
   if (isWindows) {
     ensureRuntimeDir();
     ensureClaudeEnvFile();
+    await ensureWindowsAutoStartRegistration();
     writeFileSync(
       getWindowsMarkerPath(),
       JSON.stringify(
         {
           node: getNodePath(),
+          cli: getCliScriptPath(),
           daemon: getDaemonScriptPath(),
           log: getLogPath(),
           errorLog: getErrorLogPath(),
           envFile: CLAUDE_ENV_PATH,
+          autoStartCommand: getWindowsAutoStartCommand(),
         },
         null,
         2
@@ -199,7 +270,7 @@ export async function installDaemon(): Promise<{ success: boolean; message: stri
 
     return {
       success: true,
-      message: `Windows background runner configured at ${getWindowsMarkerPath()}`,
+      message: `Windows background runner configured at ${getWindowsMarkerPath()} and registered to start automatically after sign-in.`,
     };
   }
 
@@ -251,6 +322,7 @@ export async function uninstallDaemon(): Promise<{ success: boolean; message: st
 
   if (isWindows) {
     await stopDaemon();
+    await removeWindowsAutoStartRegistration();
     const markerPath = getWindowsMarkerPath();
     const pidPath = getPidPath();
 
@@ -342,6 +414,8 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
 
   if (isWindows) {
     ensureRuntimeDir();
+    ensureClaudeEnvFile();
+    await ensureWindowsAutoStartRegistration();
     const currentPid = readPidFile();
     if (currentPid && isProcessRunning(currentPid)) {
       return {
