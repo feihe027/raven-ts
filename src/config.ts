@@ -38,11 +38,57 @@ export interface ImageConfig {
   timeoutMs: number;
 }
 
+export type McpToolPermissionPolicy = "always_allow" | "always_ask" | "always_deny";
+
+export interface McpToolPolicy {
+  name: string;
+  permission_policy: McpToolPermissionPolicy;
+}
+
+interface BaseMcpServerConfig {
+  alwaysLoad?: boolean;
+  enabled?: boolean;
+  required?: boolean;
+  startup_timeout_sec?: number;
+  tool_timeout_sec?: number;
+  enabled_tools?: string[];
+  disabled_tools?: string[];
+}
+
+export type McpServerConfig =
+  | (BaseMcpServerConfig & {
+      type?: "stdio";
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      cwd?: string;
+      env_vars?: string[];
+      experimental_environment?: Record<string, string>;
+    })
+  | (BaseMcpServerConfig & {
+      type?: "sse" | "http";
+      url: string;
+      headers?: Record<string, string>;
+      http_headers?: Record<string, string>;
+      env_http_headers?: Record<string, string>;
+      bearer_token_env_var?: string;
+      scopes?: string[];
+      oauth_resource?: string;
+      supports_parallel_tool_calls?: boolean;
+      tools?: McpToolPolicy[];
+    });
+
+export interface McpConfig {
+  enabled: boolean;
+  servers: Record<string, McpServerConfig>;
+}
+
 export interface AppConfig {
   feishu: FeishuConfig | null;
   claude: ClaudeConfig;
   codex: CodexConfig;
   image: ImageConfig;
+  mcp: McpConfig;
   agent: {
     provider: AgentProvider;
   };
@@ -70,6 +116,10 @@ const defaults: AppConfig = {
     quality: "medium",
     outputFormat: "png",
     timeoutMs: 180000,
+  },
+  mcp: {
+    enabled: true,
+    servers: {},
   },
   agent: {
     provider: "claude",
@@ -102,6 +152,7 @@ function migrateLegacyConfig(): void {
     config.set("claude", legacyConfig.get("claude"));
     config.set("codex", legacyConfig.get("codex"));
     config.set("image", legacyConfig.get("image"));
+    config.set("mcp", legacyConfig.get("mcp"));
     config.set("agent", legacyConfig.get("agent"));
     return;
   }
@@ -141,6 +192,14 @@ export function getImageConfig(): ImageConfig {
 
 export function setImageConfig(cfg: Partial<ImageConfig>): void {
   config.set("image", { ...config.get("image"), ...cfg });
+}
+
+export function getMcpConfig(): McpConfig {
+  return config.get("mcp");
+}
+
+export function setMcpConfig(cfg: Partial<McpConfig>): void {
+  config.set("mcp", { ...config.get("mcp"), ...cfg });
 }
 
 export function getAgentProvider(): AgentProvider {

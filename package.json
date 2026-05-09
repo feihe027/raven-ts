@@ -17,6 +17,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
+    "test:mcp": "node scripts/test-mcp-server.js",
     "postinstall": "node scripts/patch-codex-sdk.js && node scripts/install-raven-skills.js",
     "prepublishOnly": "npm run build"
   },

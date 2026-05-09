@@ -10,12 +10,14 @@ import {
   statSync,
   unlinkSync,
 } from "fs";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import {
   getAgentProvider,
   getCodexConfig,
   getFeishuConfig,
   getImageConfig,
+  getMcpConfig,
   getClaudeConfig,
   setAgentProvider,
   setClaudeConfig,
@@ -39,6 +41,8 @@ import {
 import type { AgentPrompt } from "../agent/prompt.js";
 import { generateOpenAIImage } from "../image/openai.js";
 import { captureDesktopScreenshot } from "../image/screenshot.js";
+import { getConfiguredMcpServerNames, getMcpServerNames } from "../mcp/config.js";
+import { smokeTestConfiguredMcpServer } from "../mcp/client.js";
 import { ClaudeStreamingReply, CodexStreamingReply } from "./streaming.js";
 import {
   cancelPendingToolPermissions,
@@ -368,6 +372,8 @@ async function handleCommand(
 \`/r image <prompt>\` - Generate an image and reply with it
 \`/r image-test\` - Send a tiny built-in image to verify Feishu image delivery
 \`/r screenshot\` - Capture the current desktop and send it as an image
+\`/r mcp\` - Show configured MCP servers
+\`/r mcp-test [server]\` - Connect to an MCP stdio server and test tools
 
 Just send any message without prefix to execute with the configured agent.
 Use \`!your message\` to interrupt the current run and execute a new prompt immediately.`,
@@ -507,6 +513,17 @@ Use \`!your message\` to interrupt the current run and execute a new prompt imme
     case "ss":
     case "capture": {
       await handleScreenshotCommand(event, context);
+      break;
+    }
+
+    case "mcp": {
+      await handleMcpCommand(event, context);
+      break;
+    }
+
+    case "mcp-test":
+    case "mcptest": {
+      await handleMcpTestCommand(args, event, context);
       break;
     }
 
@@ -822,6 +839,80 @@ async function handleScreenshotCommand(
       event.messageId,
       `[ERROR] **Screenshot failed**\n\n\`\`\`\n${truncateForFeishu(message, 3000)}\n\`\`\``,
       "Screenshot Failed"
+    );
+  }
+}
+
+async function handleMcpCommand(event: MessageEvent, context: HandlerContext): Promise<void> {
+  const mcp = getMcpConfig();
+  const configuredNames = getConfiguredMcpServerNames(mcp);
+  const activeNames = getMcpServerNames(mcp);
+  await replyWithCard(
+    context.client,
+    event.messageId,
+    [
+      `**Enabled:** \`${mcp.enabled}\``,
+      `**Active servers:** ${
+        activeNames.length > 0 ? activeNames.map((name) => `\`${name}\``).join(", ") : "(none)"
+      }`,
+      `**Configured servers:** ${
+        configuredNames.length > 0 ? configuredNames.map((name) => `\`${name}\``).join(", ") : "(none)"
+      }`,
+      "",
+      "Configure with:",
+      "`raven-ts config set mcp.servers '<json>'`",
+      "",
+      "Claude receives MCP servers through the Claude Agent SDK. Codex receives the same config through Codex CLI config overrides when supported by the installed Codex SDK/CLI.",
+    ].join("\n"),
+    "MCP"
+  );
+}
+
+async function handleMcpTestCommand(
+  args: string[],
+  event: MessageEvent,
+  context: HandlerContext
+): Promise<void> {
+  const serverName = args[1];
+  await replyToMessage(
+    context.client,
+    event.messageId,
+    `Testing MCP server${serverName ? `: ${serverName}` : ""}...`
+  );
+
+  try {
+    const result = await smokeTestConfiguredMcpServer(serverName, { timeoutMs: 10000 });
+    const callLines = result.calls.length
+      ? result.calls.map((call) => {
+          if (call.ok) {
+            return `- \`${call.tool}\`: ${call.text ? inlineCodeOrBlock(call.text) : "(ok)"}`;
+          }
+          return `- \`${call.tool}\`: ERROR ${call.error ?? "unknown error"}`;
+        })
+      : ["- No built-in test tools (`echo`, `now`) were found to call."];
+
+    await replyWithCard(
+      context.client,
+      event.messageId,
+      [
+        `**Server:** \`${result.serverName}\``,
+        `**Server info:** \`${result.serverInfoName ?? "unknown"}@${
+          result.serverInfoVersion ?? "unknown"
+        }\``,
+        `**Tools:** ${result.tools.length ? result.tools.map((tool) => `\`${tool}\``).join(", ") : "(none)"}`,
+        "",
+        "**Calls:**",
+        ...callLines,
+      ].join("\n"),
+      "MCP Test"
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await replyWithCard(
+      context.client,
+      event.messageId,
+      `[ERROR] **MCP test failed**\n\n\`\`\`\n${truncateForFeishu(message, 3000)}\n\`\`\``,
+      "MCP Test Failed"
     );
   }
 }
@@ -1467,6 +1558,16 @@ function truncateForFeishu(text: string, maxLength: number = 28000): string {
   return text.slice(0, maxLength) + "\n\n... (truncated)";
 }
 
+function inlineCodeOrBlock(text: string): string {
+  return text.length <= 120 && !text.includes("\n")
+    ? `\`${text.replace(/`/g, "\\`")}\``
+    : `\n${codeBlock(text, "text")}`;
+}
+
+function codeBlock(text: string, language = ""): string {
+  return `\`\`\`${language}\n${text.replace(/```/g, "``\\`")}\n\`\`\``;
+}
+
 /**
  * Format duration in human readable format
  */
@@ -1481,9 +1582,12 @@ function formatTimestamp(timestamp?: number): string {
 }
 
 function resolveWorkDir(currentWorkDir: string, requestedPath: string): string {
-  if (requestedPath === "~" || requestedPath.startsWith("~/")) {
-    const home = process.env.HOME ?? "";
-    return resolve(home, requestedPath.slice(2));
+  if (requestedPath === "~") {
+    return homedir();
+  }
+
+  if (requestedPath.startsWith("~/") || requestedPath.startsWith("~\\")) {
+    return resolve(homedir(), requestedPath.slice(2));
   }
   return resolve(currentWorkDir, requestedPath);
 }

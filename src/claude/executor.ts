@@ -12,6 +12,7 @@ import type {
   SDKMessage,
   SDKResultMessage,
   SDKUserMessage,
+  McpServerConfig as ClaudeMcpServerConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeAuthMode } from "../config.js";
 import {
@@ -19,6 +20,7 @@ import {
   parseImageDataUri,
   type AgentPrompt,
 } from "../agent/prompt.js";
+import { buildClaudeMcpConfig, getMcpSignature } from "../mcp/config.js";
 
 const require = createRequire(import.meta.url);
 
@@ -79,6 +81,7 @@ interface ClaudeRuntime {
   key: string;
   workDir: string;
   authMode: ClaudeAuthMode;
+  mcpSignature: string;
   input: ClaudeInputQueue;
   query: Query;
   iterator: AsyncIterator<SDKMessage>;
@@ -609,8 +612,14 @@ async function getOrCreateClaudeRuntime(
   options: ExecuteOptions
 ): Promise<ClaudeRuntime> {
   const authMode = normalizeClaudeAuthMode(options.authMode);
+  const mcpSignature = getMcpSignature();
   const existing = claudeRuntimes.get(key);
-  if (existing && existing.workDir === options.workDir && existing.authMode === authMode) {
+  if (
+    existing &&
+    existing.workDir === options.workDir &&
+    existing.authMode === authMode &&
+    existing.mcpSignature === mcpSignature
+  ) {
     return existing;
   }
 
@@ -624,9 +633,11 @@ async function getOrCreateClaudeRuntime(
     key,
     workDir: options.workDir,
     authMode,
+    mcpSignature,
     input,
   } as ClaudeRuntime;
   const permissionOptions = buildClaudePermissionOptions(runtime);
+  const mcpServers = buildClaudeMcpConfig();
 
   const stream = query({
     prompt: input,
@@ -643,6 +654,7 @@ async function getOrCreateClaudeRuntime(
       },
       env: process.env,
       maxTurns: options.maxTurns,
+      mcpServers: mcpServers ? (mcpServers as Record<string, ClaudeMcpServerConfig>) : undefined,
       pathToClaudeCodeExecutable: resolveClaudeCodeExecutablePath(),
       allowDangerouslySkipPermissions: authMode === "bypass" ? true : undefined,
       ...permissionOptions,

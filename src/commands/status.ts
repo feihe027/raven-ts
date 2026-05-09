@@ -7,6 +7,7 @@ import {
   getClaudeConfig,
   getConfigPath,
   getImageConfig,
+  getMcpConfig,
 } from "../config.js";
 import { getDaemonStatus } from "../daemon/service.js";
 import { checkClaudeSdkAvailable, getAnthropicEnvVarNames } from "../claude/executor.js";
@@ -18,6 +19,7 @@ import {
 import { listSessions } from "../session/store.js";
 import { CLAUDE_ENV_PATH } from "../claude/env.js";
 import { getLogPath } from "../daemon/paths.js";
+import { getConfiguredMcpServerNames, getMcpServerNames } from "../mcp/config.js";
 
 export async function statusCommand(): Promise<void> {
   console.log(chalk.cyan("\nraven-ts status\n"));
@@ -86,6 +88,10 @@ export async function statusCommand(): Promise<void> {
   console.log(`  Image quality: ${imageConfig.quality ?? "(provider default)"}`);
   console.log(`  Image output: ${imageConfig.outputFormat}`);
   console.log(`  Image timeout: ${imageConfig.timeoutMs}ms`);
+  const mcpConfig = getMcpConfig();
+  console.log(`  MCP enabled: ${mcpConfig.enabled}`);
+  console.log(`  MCP active servers: ${getMcpServerNames(mcpConfig).join(", ") || "(none)"}`);
+  console.log(`  MCP configured servers: ${getConfiguredMcpServerNames(mcpConfig).join(", ") || "(none)"}`);
   console.log();
 
   // Daemon status

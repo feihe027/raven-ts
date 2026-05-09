@@ -50,6 +50,23 @@ function getDaemonScriptPath(): string {
   return join(__dirname, "..", "daemon.js");
 }
 
+function getServicePathValue(): string {
+  return `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(homedir(), ".local", "bin")}`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function quoteSystemdArg(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 /**
  * Generate macOS LaunchAgent plist content
  */
@@ -62,24 +79,24 @@ function generateLaunchAgentPlist(): string {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${LAUNCH_AGENT_NAME}</string>
+    <string>${escapeXml(LAUNCH_AGENT_NAME)}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodePath}</string>
-        <string>${daemonPath}</string>
+        <string>${escapeXml(nodePath)}</string>
+        <string>${escapeXml(daemonPath)}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${getLogPath()}</string>
+    <string>${escapeXml(getLogPath())}</string>
     <key>StandardErrorPath</key>
-    <string>${getErrorLogPath()}</string>
+    <string>${escapeXml(getErrorLogPath())}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(homedir(), ".local", "bin")}</string>
+        <string>${escapeXml(getServicePathValue())}</string>
     </dict>
 </dict>
 </plist>`;
@@ -98,13 +115,13 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${nodePath} ${daemonPath}
+ExecStart=${quoteSystemdArg(nodePath)} ${quoteSystemdArg(daemonPath)}
 Restart=always
 RestartSec=10
 StandardOutput=file:${getLogPath()}
 StandardError=file:${getErrorLogPath()}
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${join(homedir(), ".local", "bin")}
-EnvironmentFile=${CLAUDE_ENV_PATH}
+Environment=${quoteSystemdArg(`PATH=${getServicePathValue()}`)}
+EnvironmentFile=${quoteSystemdArg(CLAUDE_ENV_PATH)}
 
 [Install]
 WantedBy=default.target
@@ -202,8 +219,8 @@ export async function uninstallDaemon(): Promise<{ success: boolean; message: st
     if (existsSync(plistPath)) {
       // First unload if running
       try {
-        const { execSync } = await import("child_process");
-        execSync(`launchctl bootout gui/${process.getuid?.() ?? ""} ${LAUNCH_AGENT_NAME}`, {
+        const { execFileSync } = await import("child_process");
+        execFileSync("launchctl", ["bootout", `gui/${process.getuid?.() ?? ""}`, LAUNCH_AGENT_NAME], {
           stdio: "ignore",
         });
       } catch {
@@ -261,13 +278,13 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
   }
 
   if (isMacOS) {
-    const { execSync } = await import("child_process");
+    const { execFileSync } = await import("child_process");
     const plistPath = getLaunchAgentPath();
     const uid = process.getuid?.() ?? "";
 
     // First try to bootout in case service is in weird state
     try {
-      execSync(`launchctl bootout gui/${uid} ${LAUNCH_AGENT_NAME}`, {
+      execFileSync("launchctl", ["bootout", `gui/${uid}`, LAUNCH_AGENT_NAME], {
         stdio: "ignore",
       });
     } catch {
@@ -276,7 +293,7 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
 
     // Also try remove for cached entries with SIGKILL status
     try {
-      execSync(`launchctl remove ${LAUNCH_AGENT_NAME}`, {
+      execFileSync("launchctl", ["remove", LAUNCH_AGENT_NAME], {
         stdio: "ignore",
       });
     } catch {
@@ -287,7 +304,7 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     try {
-      execSync(`launchctl bootstrap gui/${uid} ${plistPath}`, {
+      execFileSync("launchctl", ["bootstrap", `gui/${uid}`, plistPath], {
         stdio: "pipe",
       });
 
@@ -304,12 +321,12 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
   }
 
   if (isLinux) {
-    const { execSync } = await import("child_process");
+    const { execFileSync } = await import("child_process");
 
     try {
-      execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-      execSync(`systemctl --user start ${SYSTEMD_SERVICE_NAME}`, { stdio: "pipe" });
-      execSync(`systemctl --user enable ${SYSTEMD_SERVICE_NAME}`, { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "start", SYSTEMD_SERVICE_NAME], { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "enable", SYSTEMD_SERVICE_NAME], { stdio: "pipe" });
 
       return {
         success: true,
@@ -374,11 +391,11 @@ export async function startDaemon(): Promise<{ success: boolean; message: string
  */
 export async function stopDaemon(): Promise<{ success: boolean; message: string }> {
   if (isMacOS) {
-    const { execSync } = await import("child_process");
+    const { execFileSync } = await import("child_process");
 
     // Step 1: Kill daemon processes first (while launchd is still managing)
     try {
-      execSync("pkill -9 -f 'node.*raven-ts.*daemon.js'", { stdio: "ignore" });
+      execFileSync("pkill", ["-9", "-f", "node.*raven-ts.*daemon.js"], { stdio: "ignore" });
     } catch {
       // Ignore if no process to kill
     }
@@ -388,7 +405,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
     // Step 3: Bootout from launchd to stop managing
     try {
-      execSync(`launchctl bootout gui/${process.getuid?.() ?? ""} ${LAUNCH_AGENT_NAME}`, {
+      execFileSync("launchctl", ["bootout", `gui/${process.getuid?.() ?? ""}`, LAUNCH_AGENT_NAME], {
         stdio: "ignore",
       });
     } catch {
@@ -397,7 +414,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
     // Step 3.5: Also remove cached entry (for SIGKILL'd services)
     try {
-      execSync(`launchctl remove ${LAUNCH_AGENT_NAME}`, { stdio: "ignore" });
+      execFileSync("launchctl", ["remove", LAUNCH_AGENT_NAME], { stdio: "ignore" });
     } catch {
       // Ignore if not present
     }
@@ -407,7 +424,7 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
 
     let stillRunning = false;
     try {
-      const result = execSync("pgrep -f 'node.*raven-ts.*daemon.js'", {
+      const result = execFileSync("pgrep", ["-f", "node.*raven-ts.*daemon.js"], {
         encoding: "utf-8",
         stdio: ["pipe", "pipe"],
       });
@@ -418,12 +435,12 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
     }
 
     if (stillRunning) {
-    // Force kill any remaining
-    try {
-      execSync("pkill -9 -f 'node.*raven-ts.*daemon.js'", { stdio: "ignore" });
-    } catch {
-      // Ignore
-    }
+      // Force kill any remaining
+      try {
+        execFileSync("pkill", ["-9", "-f", "node.*raven-ts.*daemon.js"], { stdio: "ignore" });
+      } catch {
+        // Ignore
+      }
     }
 
     return {
@@ -433,10 +450,10 @@ export async function stopDaemon(): Promise<{ success: boolean; message: string 
   }
 
   if (isLinux) {
-    const { execSync } = await import("child_process");
+    const { execFileSync } = await import("child_process");
 
     try {
-      execSync(`systemctl --user stop ${SYSTEMD_SERVICE_NAME}`, { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "stop", SYSTEMD_SERVICE_NAME], { stdio: "pipe" });
     } catch {
       // Ignore errors
     }
@@ -511,8 +528,8 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
 
   if (isMacOS && installed) {
     try {
-      const { execSync } = await import("child_process");
-      const result = execSync(`launchctl print gui/${process.getuid?.() ?? ""}/${LAUNCH_AGENT_NAME}`, {
+      const { execFileSync } = await import("child_process");
+      const result = execFileSync("launchctl", ["print", `gui/${process.getuid?.() ?? ""}/${LAUNCH_AGENT_NAME}`], {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "ignore"],
       });
@@ -524,8 +541,8 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
 
   if (isLinux && installed) {
     try {
-      const { execSync } = await import("child_process");
-      const result = execSync(`systemctl --user is-active ${SYSTEMD_SERVICE_NAME}`, {
+      const { execFileSync } = await import("child_process");
+      const result = execFileSync("systemctl", ["--user", "is-active", SYSTEMD_SERVICE_NAME], {
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "ignore"],
       });

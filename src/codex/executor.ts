@@ -17,6 +17,7 @@ import {
   parseImageDataUri,
   type AgentPrompt,
 } from "../agent/prompt.js";
+import { buildCodexMcpConfig, getMcpSignature } from "../mcp/config.js";
 
 export interface ExecuteCodexResult {
   success: boolean;
@@ -238,6 +239,12 @@ function getOrCreateRuntime(options: ExecuteCodexOptions, startedAt: number): Ca
   if (options.config.codexBin) {
     codexOptions.codexPathOverride = options.config.codexBin;
   }
+  const mcpServers = buildCodexMcpConfig();
+  if (mcpServers) {
+    codexOptions.config = {
+      mcp_servers: mcpServers,
+    };
+  }
 
   const codex = new Codex(codexOptions);
   const threadOptions = getThreadOptions(options);
@@ -278,6 +285,7 @@ function getRuntimeSignature(options: ExecuteCodexOptions): string {
     skipGitRepoCheck: options.config.skipGitRepoCheck,
     networkAccessEnabled: options.config.networkAccessEnabled,
     sandboxMode: options.config.sandboxMode ?? "workspace-write",
+    mcp: getMcpSignature(),
   });
 }
 

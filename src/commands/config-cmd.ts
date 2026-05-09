@@ -1,4 +1,6 @@
 import chalk from "chalk";
+import { homedir } from "os";
+import { resolve } from "path";
 import {
   getAgentProvider,
   getCodexConfig,
@@ -6,17 +8,21 @@ import {
   getClaudeConfig,
   getConfigPath,
   getImageConfig,
+  getMcpConfig,
   setAgentProvider,
   setCodexConfig,
   setFeishuConfig,
   setImageConfig,
+  setMcpConfig,
   setClaudeConfig,
   type AgentProvider,
   type ClaudeConfig,
   type CodexConfig,
   type FeishuConfig,
   type ImageConfig,
+  type McpConfig,
 } from "../config.js";
+import { getConfiguredMcpServerNames, getMcpServerNames, parseMcpServersJson } from "../mcp/config.js";
 
 export async function configCommand(action: string, key?: string, value?: string): Promise<void> {
   switch (action) {
@@ -52,6 +58,8 @@ export async function configCommand(action: string, key?: string, value?: string
         console.log("  image.quality");
         console.log("  image.outputFormat");
         console.log("  image.timeoutMs");
+        console.log("  mcp.enabled");
+        console.log("  mcp.servers");
         return;
       }
       await setConfigValue(key, value);
@@ -76,6 +84,7 @@ function showConfig(): void {
   const claude = getClaudeConfig();
   const codex = getCodexConfig();
   const image = getImageConfig();
+  const mcp = getMcpConfig();
 
   console.log(chalk.bold("Agent:"));
   console.log(`  provider: ${getAgentProvider()}`);
@@ -117,6 +126,12 @@ function showConfig(): void {
   console.log(`  outputFormat: ${image.outputFormat}`);
   console.log(`  timeoutMs: ${image.timeoutMs}`);
   console.log();
+
+  console.log(chalk.bold("MCP:"));
+  console.log(`  enabled: ${mcp.enabled}`);
+  console.log(`  activeServers: ${getMcpServerNames(mcp).join(", ") || "(none)"}`);
+  console.log(`  configuredServers: ${getConfiguredMcpServerNames(mcp).join(", ") || "(none)"}`);
+  console.log();
 }
 
 async function setConfigValue(key: string, value: string): Promise<void> {
@@ -132,6 +147,8 @@ async function setConfigValue(key: string, value: string): Promise<void> {
     setCodexValue(key, subkey, value);
   } else if (section === "image") {
     setImageValue(key, subkey, value);
+  } else if (section === "mcp") {
+    setMcpValue(key, subkey, value);
   } else {
     console.log(chalk.red(`Unknown section: ${section}`));
   }
@@ -193,7 +210,7 @@ function setAgentValue(key: string, subkey: string, value: string): void {
 function setClaudeValue(key: string, subkey: string, value: string): void {
   switch (subkey) {
     case "defaultWorkDir":
-      setClaudeConfig({ defaultWorkDir: value });
+      setClaudeConfig({ defaultWorkDir: resolveUserPath(value) });
       break;
     case "maxTurns": {
       const parsed = parsePositiveInteger(value, "claude.maxTurns");
@@ -273,6 +290,16 @@ function setCodexValue(key: string, subkey: string, value: string): void {
   console.log(chalk.green(`Set ${key}`));
 }
 
+function resolveUserPath(value: string): string {
+  if (value === "~") {
+    return homedir();
+  }
+  if (value.startsWith("~/") || value.startsWith("~\\")) {
+    return resolve(homedir(), value.slice(2));
+  }
+  return value;
+}
+
 function setImageValue(key: string, subkey: string, value: string): void {
   const patch: Partial<ImageConfig> = {};
 
@@ -309,6 +336,33 @@ function setImageValue(key: string, subkey: string, value: string): void {
   }
 
   setImageConfig(patch);
+  console.log(chalk.green(`Set ${key}`));
+}
+
+function setMcpValue(key: string, subkey: string, value: string): void {
+  const patch: Partial<McpConfig> = {};
+
+  switch (subkey) {
+    case "enabled": {
+      const parsed = parseBoolean(value, "mcp.enabled");
+      if (parsed === null) return;
+      patch.enabled = parsed;
+      break;
+    }
+    case "servers":
+      try {
+        patch.servers = parseMcpServersJson(value);
+      } catch (err) {
+        console.log(chalk.red(err instanceof Error ? err.message : String(err)));
+        return;
+      }
+      break;
+    default:
+      console.log(chalk.red(`Unknown key: mcp.${subkey}`));
+      return;
+  }
+
+  setMcpConfig(patch);
   console.log(chalk.green(`Set ${key}`));
 }
 

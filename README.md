@@ -19,7 +19,7 @@ Users send messages in Feishu/Lark. `raven-ts` receives them through the bot Web
 - `/r stop` to stop the active run and clear queued Claude prompts.
 - Successful replies now include token usage at the bottom of the reply card, with input/output/total counts.
 - Per-chat work directory and agent session binding.
-- Windows background service with PID, logs, status, and hidden console windows.
+- Cross-platform daemon support for Windows, macOS, and Linux with PID, logs, and status checks.
 - Duplicate Feishu/Lark event protection with message-id dedup and a short content dedup window.
 
 ## Message Flow
@@ -221,6 +221,9 @@ Send commands in Feishu/Lark:
 /r image <prompt>
 /r image-test
 /r screenshot
+/r ss
+/r capture
+/r mcp
 ```
 
 Command behavior:
@@ -233,7 +236,8 @@ Command behavior:
 - `/r sandbox status|on|off` shows or changes the Codex sandbox mode. `on` maps to `workspace-write`; `off` maps to `danger-full-access`.
 - `/r image <prompt>` generates an image with the OpenAI Image API, uploads it to Feishu/Lark, and replies with an image message.
 - `/r image-test` sends a built-in PNG through Feishu/Lark upload and image-message APIs to verify bot image delivery.
-- `/r screenshot` captures the current Windows desktop and sends it as an image message.
+- `/r screenshot`, `/r ss`, and `/r capture` capture the current desktop and send it as an image message. Windows, macOS, and Linux are supported when the service has access to a graphical session.
+- `/r mcp` shows enabled and configured MCP servers.
 - `/r claude` and `/r codex` switch the backend.
 - `!your message` interrupts the current run and starts a fresh run with the new prompt.
 
@@ -256,6 +260,55 @@ raven-ts config set image.timeoutMs 180000
 ```
 
 The Feishu/Lark app needs `im:resource` to upload the generated image and `im:message:send_as_bot` to send it.
+
+## Screenshots
+
+`/r screenshot` captures the machine where the raven-ts service is running:
+
+- Windows: uses PowerShell with .NET `System.Drawing`.
+- macOS: uses `/usr/sbin/screencapture`; the service user may need Screen Recording permission.
+- Linux: tries `grim`, `gnome-screenshot`, `scrot`, then ImageMagick `import`. A desktop session is required.
+
+## MCP
+
+MCP servers are configured once and passed to the configured agent runtime. Claude receives them through the Claude Agent SDK. Codex receives them through Codex CLI `mcp_servers` config overrides.
+
+```sh
+raven-ts config set mcp.enabled true
+raven-ts config set mcp.servers "{\"filesystem\":{\"type\":\"stdio\",\"command\":\"npx\",\"args\":[\"-y\",\"@modelcontextprotocol/server-filesystem\",\"G:/github\"]}}"
+```
+
+You can also paste common MCP JSON that is wrapped in `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "G:/github"]
+    }
+  }
+}
+```
+
+Supported server types in `mcp.servers` are `stdio`, `sse`, and `http`. For Codex, HTTP servers are emitted as `mcp_servers.<name>.url`; for Claude, remote servers keep their `type` field. Restart the daemon after changing MCP config so long-running runtimes reconnect with the new server list.
+
+A local test MCP server is included:
+
+```sh
+npm run test:mcp
+```
+
+To connect that test server to raven-ts, use an absolute script path:
+
+```sh
+raven-ts config set mcp.enabled true
+raven-ts config set mcp.servers "{\"raven_test\":{\"type\":\"stdio\",\"command\":\"node\",\"args\":[\"G:/github/raven-ts/scripts/mcp-test-server.js\"]}}"
+raven-ts stop
+raven-ts start
+```
+
+The test server exposes two tools: `echo` and `now`.
 
 ## Codex
 
@@ -285,6 +338,7 @@ raven-ts config set codex.timeoutMs 300000
 raven-ts config set codex.networkAccessEnabled true
 raven-ts config set codex.sandboxMode workspace-write
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
+raven-ts config set codex.codexBin /usr/local/bin/codex
 ```
 
 Reset Codex binary to SDK default:
@@ -302,6 +356,7 @@ Config examples:
 ```sh
 raven-ts config set agent.provider claude
 raven-ts config set claude.defaultWorkDir C:\repo\project
+raven-ts config set claude.defaultWorkDir ~/repo/project
 raven-ts config set claude.maxTurns 20
 raven-ts config set claude.timeoutMs 300000
 raven-ts config set claude.authMode safe
@@ -319,9 +374,15 @@ Claude auth modes:
 - `deny`: deny non-preapproved operations instead of asking.
 - `bypass`: skip Claude permission checks. Use only in an externally sandboxed environment.
 
-## Windows Notes
+## Platform Notes
 
-`raven-ts start` runs a background Node daemon and stores runtime files in:
+`raven-ts start` runs a background Node daemon:
+
+- Windows: background Node process with a PID file under `%LOCALAPPDATA%\raven-ts`.
+- macOS: LaunchAgent under `~/Library/LaunchAgents`.
+- Linux: user systemd service under `~/.config/systemd/user`.
+
+Windows runtime files are stored in:
 
 ```text
 %LOCALAPPDATA%\raven-ts

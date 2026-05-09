@@ -15,41 +15,104 @@ export interface ScreenshotResult {
 export async function captureDesktopScreenshot(
   options: { timeoutMs?: number } = {}
 ): Promise<ScreenshotResult> {
-  if (process.platform !== "win32") {
-    throw new Error("Screenshot capture is currently implemented for Windows only.");
-  }
-
   const tempDir = await mkdtemp(join(tmpdir(), "raven-ts-screenshot-"));
   const outputPath = join(tempDir, "screenshot.png");
 
   try {
-    const script = buildScreenshotScript();
-    const { stdout } = await execFileAsync(
-      getPowerShellPath(),
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-EncodedCommand",
-        Buffer.from(script, "utf16le").toString("base64"),
-      ],
-      {
-        env: {
-          ...process.env,
-          RAVEN_TS_SCREENSHOT_PATH: outputPath,
-        },
-        timeout: options.timeoutMs ?? 15000,
-        windowsHide: true,
-      }
-    );
-
+    await captureToFile(outputPath, options.timeoutMs ?? 15000);
     const bytes = await readFile(outputPath);
-    const dimensions = parseDimensions(stdout);
+    const dimensions = readPngDimensions(bytes);
     return { bytes, ...dimensions };
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+}
+
+async function captureToFile(outputPath: string, timeoutMs: number): Promise<void> {
+  if (process.platform === "win32") {
+    await captureWindows(outputPath, timeoutMs);
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    await captureMacOS(outputPath, timeoutMs);
+    return;
+  }
+
+  if (process.platform === "linux") {
+    await captureLinux(outputPath, timeoutMs);
+    return;
+  }
+
+  throw new Error(`Screenshot capture is not supported on ${process.platform}.`);
+}
+
+async function captureWindows(outputPath: string, timeoutMs: number): Promise<void> {
+  const script = buildScreenshotScript();
+  await execFileAsync(
+    getPowerShellPath(),
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    {
+      env: {
+        ...process.env,
+        RAVEN_TS_SCREENSHOT_PATH: outputPath,
+      },
+      timeout: timeoutMs,
+      windowsHide: true,
+    }
+  );
+}
+
+async function captureMacOS(outputPath: string, timeoutMs: number): Promise<void> {
+  try {
+    await execFileAsync("/usr/sbin/screencapture", ["-x", outputPath], {
+      timeout: timeoutMs,
+      windowsHide: true,
+    });
+  } catch (err) {
+    throw new Error(
+      `macOS screenshot failed. Grant Screen Recording permission to the terminal/service user if needed. ${formatExecError(
+        err
+      )}`
+    );
+  }
+}
+
+async function captureLinux(outputPath: string, timeoutMs: number): Promise<void> {
+  const attempts: Array<{ command: string; args: string[]; hint: string }> = [
+    { command: "grim", args: [outputPath], hint: "Wayland grim" },
+    { command: "gnome-screenshot", args: ["-f", outputPath], hint: "GNOME Screenshot" },
+    { command: "scrot", args: [outputPath], hint: "scrot" },
+    { command: "import", args: ["-window", "root", outputPath], hint: "ImageMagick import" },
+  ];
+  const errors: string[] = [];
+
+  for (const attempt of attempts) {
+    try {
+      await execFileAsync(attempt.command, attempt.args, {
+        timeout: timeoutMs,
+        windowsHide: true,
+      });
+      return;
+    } catch (err) {
+      errors.push(`${attempt.hint}: ${formatExecError(err)}`);
+    }
+  }
+
+  throw new Error(
+    [
+      "Linux screenshot failed. Install one of: grim, gnome-screenshot, scrot, or ImageMagick.",
+      "A graphical session is required; headless services usually cannot capture a desktop.",
+      ...errors.map((error) => `- ${error}`),
+    ].join("\n")
+  );
 }
 
 function buildScreenshotScript(): string {
@@ -87,14 +150,36 @@ function getPowerShellPath(): string {
   return join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
-function parseDimensions(stdout: string): { width?: number; height?: number } {
-  const match = /(\d+)x(\d+)/.exec(stdout);
-  if (!match) {
+function readPngDimensions(bytes: Buffer): { width?: number; height?: number } {
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (bytes.length < 24 || !pngSignature.every((byte, index) => bytes[index] === byte)) {
     return {};
   }
   return {
-    width: Number.parseInt(match[1], 10),
-    height: Number.parseInt(match[2], 10),
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
   };
 }
 
+function formatExecError(err: unknown): string {
+  if (!err || typeof err !== "object") {
+    return String(err);
+  }
+
+  const record = err as {
+    code?: unknown;
+    signal?: unknown;
+    message?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+  };
+  const parts = [
+    typeof record.code === "string" || typeof record.code === "number" ? `code=${record.code}` : "",
+    typeof record.signal === "string" ? `signal=${record.signal}` : "",
+    typeof record.stderr === "string" && record.stderr.trim() ? record.stderr.trim() : "",
+    typeof record.stdout === "string" && record.stdout.trim() ? record.stdout.trim() : "",
+    typeof record.message === "string" ? record.message : "",
+  ].filter(Boolean);
+
+  return parts.join(" | ") || String(err);
+}

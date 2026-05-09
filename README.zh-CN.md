@@ -16,7 +16,7 @@
 - Claude 的高风险 Bash 工具调用可以通过飞书授权卡片允许或拒绝。
 - Codex thread id 按聊天持久化保存，后续 turn 会恢复上下文。
 - 按聊天维护工作目录和 Agent 会话绑定。
-- 支持 Windows 后台服务，包含 PID、日志、状态检查和隐藏控制台窗口。
+- 支持 Windows、macOS、Linux 后台 daemon，包含 PID、日志和状态检查。
 - 支持飞书/Lark 事件去重，包括 message-id 去重和短时间内容去重。
 
 ## 消息流程
@@ -217,6 +217,9 @@ Windows 日志路径：
 /r image <提示词>
 /r image-test
 /r screenshot
+/r ss
+/r capture
+/r mcp
 ```
 
 命令行为：
@@ -228,7 +231,8 @@ Windows 日志路径：
 - `/r sandbox status|on|off` 查看或修改 Codex 沙箱模式。`on` 对应 `workspace-write`，`off` 对应 `danger-full-access`。
 - `/r image <提示词>` 调用 OpenAI Image API 生成图片，上传到飞书/Lark，并以图片消息回复。
 - `/r image-test` 通过飞书/Lark 上传和图片消息接口发送内置 PNG，用于验证机器人发图链路。
-- `/r screenshot` 截取当前 Windows 桌面，并以图片消息发回飞书/Lark。
+- `/r screenshot`、`/r ss`、`/r capture` 截取当前桌面，并以图片消息发回飞书/Lark。Windows、macOS、Linux 均支持，但服务进程需要能访问图形会话。
+- `/r mcp` 查看已启用和已配置的 MCP server。
 - `/r claude` 和 `/r codex` 切换 Agent 后端。
 
 ## 图片生成
@@ -250,6 +254,55 @@ raven-ts config set image.timeoutMs 180000
 ```
 
 飞书/Lark 应用需要 `im:resource` 权限上传生成后的图片，并需要 `im:message:send_as_bot` 权限发送图片消息。
+
+## 截图
+
+`/r screenshot` 截取的是运行 raven-ts 服务的机器：
+
+- Windows：通过 PowerShell 和 .NET `System.Drawing` 截图。
+- macOS：通过 `/usr/sbin/screencapture` 截图；服务用户可能需要授予屏幕录制权限。
+- Linux：依次尝试 `grim`、`gnome-screenshot`、`scrot`、ImageMagick `import`。需要图形桌面会话。
+
+## MCP
+
+MCP server 统一配置后会传给当前 agent runtime。Claude 通过 Claude Agent SDK 接收 MCP 配置。Codex 通过 Codex CLI 的 `mcp_servers` config override 接收配置。
+
+```sh
+raven-ts config set mcp.enabled true
+raven-ts config set mcp.servers "{\"filesystem\":{\"type\":\"stdio\",\"command\":\"npx\",\"args\":[\"-y\",\"@modelcontextprotocol/server-filesystem\",\"G:/github\"]}}"
+```
+
+也可以直接粘贴常见的 `mcpServers` 包裹格式：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "G:/github"]
+    }
+  }
+}
+```
+
+`mcp.servers` 支持 `stdio`、`sse`、`http` 三类 server。对 Codex，HTTP server 会输出为 `mcp_servers.<name>.url`；对 Claude，远程 server 会保留 `type` 字段。修改 MCP 配置后建议重启 daemon，让长期运行的 runtime 用新 server 列表重连。
+
+项目内置了一个本地测试 MCP server：
+
+```sh
+npm run test:mcp
+```
+
+要把这个测试 server 接入 raven-ts，建议使用脚本的绝对路径：
+
+```sh
+raven-ts config set mcp.enabled true
+raven-ts config set mcp.servers "{\"raven_test\":{\"type\":\"stdio\",\"command\":\"node\",\"args\":[\"G:/github/raven-ts/scripts/mcp-test-server.js\"]}}"
+raven-ts stop
+raven-ts start
+```
+
+这个测试 server 暴露两个工具：`echo` 和 `now`。
 
 ## Codex
 
@@ -279,6 +332,7 @@ raven-ts config set codex.timeoutMs 300000
 raven-ts config set codex.networkAccessEnabled true
 raven-ts config set codex.sandboxMode workspace-write
 raven-ts config set codex.codexBin C:\path\to\codex.cmd
+raven-ts config set codex.codexBin /usr/local/bin/codex
 ```
 
 将 Codex binary 重置为 SDK 默认值：
@@ -296,6 +350,7 @@ raven-ts config set codex.codexBin default
 ```sh
 raven-ts config set agent.provider claude
 raven-ts config set claude.defaultWorkDir C:\repo\project
+raven-ts config set claude.defaultWorkDir ~/repo/project
 raven-ts config set claude.maxTurns 20
 raven-ts config set claude.timeoutMs 300000
 raven-ts config set claude.authMode safe
@@ -312,9 +367,15 @@ Claude 授权模式：
 - `deny`：未预授权的操作直接拒绝，不弹授权按钮。
 - `bypass`：跳过 Claude 权限检查。只建议在外部已有沙箱保护时使用。
 
-## Windows 说明
+## 平台说明
 
-`raven-ts start` 会运行后台 Node daemon，并将运行时文件保存到：
+`raven-ts start` 会运行后台 Node daemon：
+
+- Windows：后台 Node 进程，PID 文件位于 `%LOCALAPPDATA%\raven-ts`。
+- macOS：使用 `~/Library/LaunchAgents` 下的 LaunchAgent。
+- Linux：使用 `~/.config/systemd/user` 下的 user systemd service。
+
+Windows 运行时文件保存到：
 
 ```text
 %LOCALAPPDATA%\raven-ts
