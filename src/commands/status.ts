@@ -98,6 +98,9 @@ export async function statusCommand(): Promise<void> {
   console.log(chalk.bold("Background Service:"));
   const daemonStatus = await getDaemonStatus();
   console.log(`  Platform: ${daemonStatus.platform}`);
+  if (daemonStatus.autoStart) {
+    console.log(`  Auto-start: ${daemonStatus.autoStart}`);
+  }
 
   if (daemonStatus.installed) {
     console.log(chalk.green("  [OK] Installed"));

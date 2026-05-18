@@ -36,6 +36,10 @@ export function getPidPath(): string {
   return join(getRuntimeDir(), "raven-ts.pid");
 }
 
+export function getStartLockPath(): string {
+  return join(getRuntimeDir(), "raven-ts.start.lock");
+}
+
 export function getWindowsMarkerPath(): string {
   return join(getRuntimeDir(), "service.json");
 }

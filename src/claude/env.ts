@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { getRuntimeDir } from "../daemon/paths.js";
 
@@ -34,8 +34,43 @@ export function ensureClaudeEnvFile(): { path: string; created: boolean } {
   return { path: CLAUDE_ENV_PATH, created: true };
 }
 
+export function readClaudeEnvFile(): NodeJS.ProcessEnv {
+  if (!existsSync(CLAUDE_ENV_PATH)) {
+    return {};
+  }
+
+  const env: NodeJS.ProcessEnv = {};
+  for (const line of readFileSync(CLAUDE_ENV_PATH, "utf-8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, equalsIndex);
+    env[key] = unquoteEnvValue(trimmed.slice(equalsIndex + 1));
+  }
+
+  return env;
+}
+
+export function loadClaudeEnvFile(env: NodeJS.ProcessEnv = process.env): void {
+  Object.assign(env, readClaudeEnvFile());
+}
+
 function quoteEnvValue(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function unquoteEnvValue(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+  return value;
 }
 
 function isAgentEnvVar(key: string): boolean {

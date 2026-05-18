@@ -185,6 +185,8 @@ raven-ts stop
 raven-ts status
 ```
 
+On Windows, `raven-ts status` also reports the auto-start registration mode.
+
 Logs:
 
 ```sh
@@ -378,7 +380,7 @@ Claude auth modes:
 
 `raven-ts start` runs a background Node daemon:
 
-- Windows: background Node process with a PID file under `%LOCALAPPDATA%\raven-ts`, plus a per-user Run entry so it starts automatically after reboot when that user signs in.
+- Windows: background Node process with a PID file under `%LOCALAPPDATA%\raven-ts`. `raven-ts` prefers a per-user scheduled task for login auto-start, and falls back to a per-user Run entry on systems that block task registration.
 - macOS: LaunchAgent under `~/Library/LaunchAgents`.
 - Linux: user systemd service under `~/.config/systemd/user`.
 

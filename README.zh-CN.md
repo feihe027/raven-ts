@@ -182,6 +182,8 @@ raven-ts stop
 raven-ts status
 ```
 
+在 Windows 上，`raven-ts status` 也会显示自启动注册方式。
+
 日志：
 
 ```sh
@@ -371,7 +373,7 @@ Claude 授权模式：
 
 `raven-ts start` 会运行后台 Node daemon：
 
-- Windows：后台 Node 进程，PID 文件位于 `%LOCALAPPDATA%\raven-ts`，并在当前用户登录时自动启动，所以重启后登录即可自动拉起。
+- Windows：后台 Node 进程，PID 文件位于 `%LOCALAPPDATA%\raven-ts`。`raven-ts` 会优先使用当前用户的计划任务做登录自启动；如果系统阻止计划任务注册，则回退到当前用户的 Run 启动项。
 - macOS：使用 `~/Library/LaunchAgents` 下的 LaunchAgent。
 - Linux：使用 `~/.config/systemd/user` 下的 user systemd service。
 
